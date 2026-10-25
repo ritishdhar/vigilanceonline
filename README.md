@@ -2,6 +2,11 @@
 
 Local video surveillance prototype: YOLO pose tracking, pairwise ST-GCN++ fight inference, graph aggregation, and configurable fall, bag, and auxiliary threat detection.
 
+## Live app and video demo
+
+- [Open the live app](https://64.176.96.46.sslip.io/)
+- [Watch the video demo](https://youtu.be/Y2ciu2KUWQo)
+
 ## Run
 
 Use Python 3.12 on Windows. For the GPU laptop, follow [SETUP.md](SETUP.md) to install GPU-enabled PyTorch first; runtime requirements do not force CPU wheels. Real inference also requires the approved model artifacts listed in [models/manifest.json](models/manifest.json) and a camera or video source.
