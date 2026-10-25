@@ -49,7 +49,6 @@
     <a class="nav-item" href="#recipients" data-view="recipients"><svg class="icon" aria-hidden="true"><use href="#i-bell"/></svg>Alert recipients</a>
   </nav>
   <div class="sidebar-bottom">
-    <div class="workspace-note"><span class="dot cyan-dot"></span> Hackathon demo · 1 active source</div>
     <a class="nav-item" href="#settings" data-view="settings"><svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg>Preferences</a>
     <div class="workspace-user"><span class="user-avatar">R</span><span><strong>Judge workspace</strong><small>Camera intelligence</small></span></div>
   </div>
@@ -69,14 +68,13 @@
       <div class="page-actions">
         <a class="button secondary review-shortcut" href="#incidents"><svg class="icon" aria-hidden="true"><use href="#i-clock"/></svg>Review incidents <span id="pendingReviewCount" class="review-shortcut-count" title="Incidents needing review">0</span></a>
         <button class="button secondary" id="notificationButton" aria-pressed="false" title="Browser incident notifications"><svg class="icon" aria-hidden="true"><use href="#i-bell"/></svg><span id="notificationLabel">Enable alerts</span></button>
-        <button class="button primary" id="connectButton"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>Connect source</button>
+        <button class="button primary" id="connectButton"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>Connect Source/Upload Video</button>
       </div>
     </div>
     <div id="serviceNotice" class="service-notice" role="status" hidden></div>
     <section class="demo-bar" data-views="monitoring" aria-label="Test videos">
-      <div class="demo-bar-label"><svg class="icon" aria-hidden="true"><use href="#i-video"/></svg><strong>Test videos</strong></div>
+      <div class="demo-library-heading"><div><span class="demo-eyebrow">EXPLORE IN ACTION</span><h2>Video library</h2><p>Pick a clip. See detection come to life.</p></div><button class="text-button" id="demoUploadButton">Upload your own <svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></button></div>
       <div id="demoVideos" class="demo-videos"><span class="muted small">Loading available videos…</span></div>
-      <button class="text-button" id="demoUploadButton">Upload your own <svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></button>
     </section>
     <div class="workspace-grid" id="workspaceGrid">
       <div class="primary-column">
@@ -91,8 +89,8 @@
           <div class="camera-grid" id="cameraGrid">
             <article class="camera-card primary-camera" id="cardCam1">
               <div class="camera-header"><div class="camera-name"><span class="camera-code">01</span><strong id="cameraName">Main gate</strong></div><span class="camera-state" id="primaryCameraState"><span class="dot"></span><span id="cameraStateText">Connecting</span></span></div>
-              <div class="camera-feed-box"><img id="liveStream" src="/stream.mjpg" alt="Primary camera feed with detection overlays"><div class="feed-state" id="feedState"><span class="feed-state-icon"><svg class="icon" aria-hidden="true"><use href="#i-camera"/></svg></span><strong id="feedStateTitle">Connecting to your source</strong><span id="feedStateDescription">The first frame will appear here.</span><button class="button small-button secondary" id="retryStreamButton" hidden>Reconnect feed</button></div><div class="camera-overlay-alerts" id="camOverlayAlerts"></div><div class="feed-caption"><span class="feed-mode" id="feedMode">AWAITING SOURCE</span><span id="sourceClock">00:00</span></div><button class="cam-fullscreen-btn icon-button" id="fullscreenButton" aria-label="Open camera fullscreen" title="Fullscreen"><svg class="icon" aria-hidden="true"><use href="#i-expand"/></svg></button></div>
-              <div class="camera-footer"><span class="source-filename" id="sourceName">No source connected</span><button class="text-button" id="changeSourceButton">Change source <svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></button></div>
+              <div class="camera-feed-box"><img id="liveStream" src="/stream.mjpg" alt="Primary camera feed with detection overlays"><div class="feed-state" id="feedState"><span class="feed-state-icon"><svg class="icon" aria-hidden="true"><use href="#i-camera"/></svg></span><strong id="feedStateTitle">Connecting to your source</strong><span id="feedStateDescription">The first frame will appear here.</span><button type="button" class="button primary feed-connect-btn" id="feedConnectButton"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>Connect Source/Upload Video</button><button class="button small-button secondary" id="retryStreamButton" hidden>Reconnect feed</button></div><div class="camera-overlay-alerts" id="camOverlayAlerts"></div><div class="feed-caption"><span class="feed-mode" id="feedMode">AWAITING SOURCE</span><span id="sourceClock">00:00</span><button type="button" class="feed-stop-badge" id="feedStopFloatingButton" hidden><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg>Stop video</button></div><button class="cam-fullscreen-btn icon-button" id="fullscreenButton" aria-label="Open camera fullscreen" title="Fullscreen"><svg class="icon" aria-hidden="true"><use href="#i-expand"/></svg></button></div>
+              <div class="camera-footer"><span class="source-filename" id="sourceName">No source connected</span><div class="camera-footer-actions"><button type="button" class="button secondary small-button stop-monitoring-btn" id="stopMonitoringButton" hidden><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg>Stop monitoring video</button><button type="button" class="button primary small-button feed-footer-connect-btn" id="changeSourceButton"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>Connect Source/Upload Video</button></div></div>
             </article>
           </div>
           <div class="source-context"><span id="modelSummary">Checking detection models…</span><button class="text-button" id="stopWebcamButton" hidden>Stop webcam</button></div>
@@ -134,6 +132,53 @@
     <footer class="page-footer"><button class="text-button" id="tourButton">How to test</button><div class="footer-tools"><span id="freshnessLabel">Awaiting connection</span><span class="live-clock" id="wallClock"></span><button class="text-button" id="diagnosticsButton">Diagnostics</button></div></footer>
   </main>
 </div>
+<dialog id="recipientCautionDialog" class="caution-dialog" aria-labelledby="recipientCautionTitle">
+  <div class="caution-dialog-content">
+    <div class="caution-badge-row">
+      <span class="caution-eyebrow"><span class="pulse-amber"></span> Caution · Alert Dispatch</span>
+      <button class="icon-button" data-close="recipientCautionDialog" aria-label="Close caution notice"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button>
+    </div>
+    
+    <div class="caution-icon-wrapper">
+      <div class="caution-icon-box">
+        <svg class="icon caution-bell-icon" aria-hidden="true"><use href="#i-bell"/></svg>
+      </div>
+    </div>
+
+    <h2 id="recipientCautionTitle" class="caution-title">No alert recipient set up right now</h2>
+    <p class="caution-desc">
+      You are about to start model detection, but no alert recipients or Telegram channels are connected. If an incident (such as a fight, fall, weapon, or fire) occurs, <strong>notifications will not be sent to anyone</strong>.
+    </p>
+
+    <div class="caution-callout">
+      <div class="caution-callout-header">
+        <svg class="icon amber-icon" aria-hidden="true"><use href="#i-shield"/></svg>
+        <strong>What happens during detection:</strong>
+      </div>
+      <ul class="caution-list">
+        <li><span>✓</span> Live AI detection continues normally on your screen</li>
+        <li><span>✕</span> No phone, SMS, or Telegram alerts dispatched to responders</li>
+        <li><span>⚡</span> QR enrollment takes less than 60 seconds with Telegram</li>
+      </ul>
+    </div>
+
+    <div class="caution-actions">
+      <button type="button" class="button primary caution-setup-btn" id="cautionSetupRecipient">
+        <svg class="icon" aria-hidden="true"><use href="#i-bell"/></svg>
+        <span>Set up alert recipient</span>
+      </button>
+      <button type="button" class="button secondary caution-skip-btn" id="cautionSkipRecipient">
+        <span>Skip &amp; continue</span>
+        <svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg>
+      </button>
+    </div>
+
+    <label class="caution-remember">
+      <input type="checkbox" id="cautionRememberChoice">
+      <span>Don't remind me again for this session</span>
+    </label>
+  </div>
+</dialog>
 <dialog id="sourceModal" aria-labelledby="modalTitle">
   <div class="modal-header"><div><span class="eyebrow cyan">PRIMARY CAMERA · CAM-01</span><h2 id="modalTitle">Connect a source</h2></div><button class="icon-button" data-close="sourceModal" aria-label="Close source dialog"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button></div>
   <p class="dialog-intro">One source is processed at a time. Connecting replaces the active feed.</p>

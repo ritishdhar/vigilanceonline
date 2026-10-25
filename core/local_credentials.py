@@ -43,7 +43,7 @@ def _decrypt(value: str) -> str:
 
 
 def load_telegram_credentials(path: Path) -> dict[str, str]:
-    """Return secrets in memory only; never include secret contents in errors."""
+    """Load the backend bot secret in memory only."""
     if os.name != "nt" or not path.is_file():
         return {}
     try:
@@ -53,10 +53,9 @@ def load_telegram_credentials(path: Path) -> dict[str, str]:
             for node in root.iter("{http://schemas.microsoft.com/powershell/2004/04}SS")
         }
         bot = _decrypt(values["BotToken"])
-        owner = _decrypt(values["OwnerToken"])
-        if not bot or len(owner) < 32:
+        if not bot:
             raise ValueError
-        return {"bot": bot, "owner": owner}
+        return {"bot": bot}
     except Exception:
         raise ValueError(
             "Saved Telegram credentials could not be loaded. Run tools/start_telegram.ps1 -Reconfigure."

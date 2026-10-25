@@ -20,7 +20,6 @@ Hugging Face on first use unless disabled.
 from __future__ import annotations
 
 import argparse
-import os
 from pathlib import Path
 import threading
 import time
@@ -63,7 +62,6 @@ class LiveState:
         self,
         allowed_sources=(),
         inference_mode="model",
-        admin_token="",
         telegram_enrollment=None,
         allowed_hosts=None,
         allowed_origins=None,
@@ -72,8 +70,6 @@ class LiveState:
         video_plays=MAX_VIDEO_PLAYS,
     ):
         self.token = secrets.token_urlsafe(32)
-        self.admin_token = str(admin_token or "")
-        self.admin_sessions = {}
         self.telegram_enrollment = telegram_enrollment
         self.allowed_hosts = allowed_hosts
         self.allowed_origins = allowed_origins
@@ -623,13 +619,12 @@ def pump_frames(
                     item[0] for item in state.notification_events
                 ]
                 if notifier is not None:
+                    inner_notifier = getattr(notifier, "notifier", notifier)
                     state.status["telegram"] = {
                         "enabled": True,
                         "ready": bool(notifier.ready),
                         "sent": int(notifier.sent_count),
-                        "error": getattr(
-                            getattr(notifier, "notifier", notifier), "last_error", None
-                        ),
+                        "error": getattr(inner_notifier, "last_error", None),
                         "dropped": getattr(notifier, "dropped", 0),
                     }
                 else:
@@ -790,7 +785,6 @@ def main(argv=None) -> int:
         not args.no_telegram
         and not cfg.telegram_bot_token
         and not args.telegram_bot_token
-        and not os.environ.get("VIGILANCE_TELEGRAM_ADMIN_TOKEN")
     ):
         from core.local_credentials import load_telegram_credentials
 
@@ -836,26 +830,13 @@ def main(argv=None) -> int:
         print("Binding outside loopback requires --public-origin with HTTPS")
         return 2
 
-    admin_token = os.environ.get(
-        "VIGILANCE_TELEGRAM_ADMIN_TOKEN", saved_telegram.get("owner", "")
-    )
     telegram_token = args.telegram_bot_token or cfg.telegram_bot_token
-    if admin_token and len(admin_token) < 32:
-        print("VIGILANCE_TELEGRAM_ADMIN_TOKEN must contain at least 32 characters")
-        return 2
     recipient_store = None
     telegram_enrollment = None
     if args.no_telegram:
-        admin_token = ""
         telegram_token = ""
         cfg.telegram_enabled = False
-    if admin_token:
-        if not telegram_token:
-            print(
-                "Recipient setup needs VIGILANCE_TELEGRAM_BOT_TOKEN and "
-                "VIGILANCE_TELEGRAM_ADMIN_TOKEN"
-            )
-            return 2
+    if telegram_token:
         from core.telegram_recipients import (
             TelegramEnrollmentBot,
             TelegramRecipientStore,
@@ -1006,7 +987,6 @@ def main(argv=None) -> int:
     state = LiveState(
         allowed_sources=[cfg.source, *args.allow_source],
         inference_mode="synthetic" if args.synthetic else "model",
-        admin_token=admin_token,
         telegram_enrollment=telegram_enrollment,
         allowed_hosts=allowed_hosts,
         allowed_origins=allowed_origins,

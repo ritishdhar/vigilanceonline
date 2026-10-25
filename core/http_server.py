@@ -170,27 +170,6 @@ def make_handler(state):
                 return self._deny("session token required")
             return True
 
-        def _admin_authorized(self):
-            if not state.admin_token:
-                self._send_json(
-                    {"error": "recipient administration is not configured"}, 503
-                )
-                return False
-            jar = cookies.SimpleCookie()
-            try:
-                jar.load(self.headers.get("Cookie", ""))
-                token = self.headers.get("X-Vigilance-Admin") or (
-                    jar["vigilance_admin"].value if "vigilance_admin" in jar else ""
-                )
-            except cookies.CookieError:
-                token = ""
-            expires = state.admin_sessions.get(token)
-            if not token or expires is None or expires <= time.time():
-                state.admin_sessions.pop(token, None)
-                self._send_json({"error": "owner sign-in required"}, 401)
-                return False
-            return True
-
         def _read_json(self, maximum=4096):
             body = self._read_body(maximum)
             payload = json.loads(body or b"{}")
@@ -222,55 +201,19 @@ def make_handler(state):
                 raise ValueError("incomplete request body")
             return body
 
-        def _admin_api(self, method):
-            admin_paths = {
-                ("POST", "/api/admin/login"),
-                ("POST", "/api/admin/logout"),
+        def _recipient_api(self, method):
+            recipient_paths = {
                 ("GET", "/api/telegram/recipients"),
                 ("POST", "/api/telegram/invite"),
                 ("POST", "/api/telegram/invite/revoke"),
                 ("POST", "/api/telegram/test"),
                 ("DELETE", "/api/telegram/recipients"),
             }
-            if (method, self.path) not in admin_paths:
+            if (method, self.path) not in recipient_paths:
                 return False
             if not self._allowed():
                 return True
-            if method == "POST" and self.path == "/api/admin/login":
-                if not state.admin_token:
-                    self._send_json(
-                        {"error": "recipient administration is not configured"}, 503
-                    )
-                    return True
-                try:
-                    payload = self._read_json()
-                except (ValueError, OSError):
-                    self._send_json({"error": "invalid JSON request"}, 400)
-                    return True
-                supplied = payload.get("password")
-                if not isinstance(supplied, str) or not secrets.compare_digest(
-                    supplied.encode("utf-8"), state.admin_token.encode("utf-8")
-                ):
-                    self._send_json({"error": "sign-in failed"}, 401)
-                    return True
-                session = secrets.token_urlsafe(32)
-                state.admin_sessions[session] = time.time() + 12 * 60 * 60
-                secure = "; Secure" if state.secure_cookies else ""
-                self._send(
-                    200,
-                    "application/json",
-                    json.dumps({"ok": True, "admin_session": session}).encode(),
-                    (
-                        (
-                            "Set-Cookie",
-                            f"vigilance_admin={session}; HttpOnly; SameSite=Strict; Path=/{secure}; Max-Age=43200",
-                        ),
-                    ),
-                )
-                return True
             if self.path.startswith("/api/telegram/"):
-                if not self._admin_authorized():
-                    return True
                 service = state.telegram_enrollment
                 if service is None:
                     self._send_json(
@@ -357,37 +300,13 @@ def make_handler(state):
                     return True
                 self._send_json({"error": "not found"}, 404)
                 return True
-            if method == "POST" and self.path == "/api/admin/logout":
-                if not self._admin_authorized():
-                    return True
-                jar = cookies.SimpleCookie()
-                try:
-                    jar.load(self.headers.get("Cookie", ""))
-                    session = (
-                        self.headers.get("X-Vigilance-Admin")
-                        or jar["vigilance_admin"].value
-                    )
-                except (cookies.CookieError, KeyError):
-                    session = ""
-                state.admin_sessions.pop(session, None)
-                secure = "; Secure" if state.secure_cookies else ""
-                self._send_json(
-                    {"ok": True},
-                    extra_headers=(
-                        (
-                            "Set-Cookie",
-                            f"vigilance_admin=; HttpOnly; SameSite=Strict; Path=/{secure}; Max-Age=0",
-                        ),
-                    ),
-                )
-                return True
-            return False
+            return True
 
         def do_GET(self):
             if self.path == "/healthz":
                 self._send_json({"ok": True, "inference_mode": state.inference_mode})
                 return
-            if self._admin_api("GET"):
+            if self._recipient_api("GET"):
                 return
             public = (
                 self.path
@@ -464,24 +383,20 @@ def make_handler(state):
                         pass
             elif self.path == "/api/telegram/status":
                 bot = state.telegram_enrollment
-                jar = cookies.SimpleCookie()
-                try:
-                    jar.load(self.headers.get("Cookie", ""))
-                    owner_session = self.headers.get("X-Vigilance-Admin") or (
-                        jar["vigilance_admin"].value if "vigilance_admin" in jar else ""
-                    )
-                except cookies.CookieError:
-                    owner_session = ""
+                active_count = 0
+                if bot and getattr(bot, "recipients", None):
+                    try:
+                        active_count = len(bot.recipients.active_chat_ids())
+                    except Exception:
+                        pass
                 self._send_json(
                     {
-                        "configured": bool(state.admin_token and bot is not None),
+                        "configured": bot is not None,
                         "bot_ready": bool(bot and bot.username and not bot.last_error),
                         "bot_username": bot.username if bot else None,
                         "bot_error": bot.last_error if bot else None,
-                        "owner_signed_in": bool(
-                            owner_session
-                            and state.admin_sessions.get(owner_session, 0) > time.time()
-                        ),
+                        "recipient_count": active_count,
+                        "has_recipients": active_count > 0,
                     }
                 )
             elif self.path == "/api/status":
@@ -545,7 +460,7 @@ def make_handler(state):
                 self._send_json({"error": "not found"}, 404)
 
         def do_POST(self):
-            if self._admin_api("POST"):
+            if self._recipient_api("POST"):
                 return
             if not self._allowed():
                 return
@@ -721,7 +636,7 @@ def make_handler(state):
                 )
 
         def do_DELETE(self):
-            if self._admin_api("DELETE"):
+            if self._recipient_api("DELETE"):
                 return
             self._send_json({"error": "not found"}, 404)
 
@@ -736,7 +651,7 @@ def make_handler(state):
                     ("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS"),
                     (
                         "Access-Control-Allow-Headers",
-                        "Content-Type, X-Vigilance-Token, X-Vigilance-Admin, X-Vigilance-Camera",
+                        "Content-Type, X-Vigilance-Token, X-Vigilance-Camera",
                     ),
                     ("Access-Control-Max-Age", "600"),
                 ),

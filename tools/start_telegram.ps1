@@ -7,7 +7,6 @@ No tokens are placed in command-line arguments, source files, or user-wide envir
 param(
     [switch]$ConfigureOnly,
     [switch]$Reconfigure,
-    [switch]$ShowOwnerToken,
     [switch]$Synthetic,
     [ValidateRange(1, 65535)][int]$Port = 8000,
     [string]$Source = '',
@@ -47,16 +46,11 @@ $credentials = $null
 if (-not $Reconfigure -and (Test-Path -LiteralPath $secretPath)) {
     try { $credentials = Import-Clixml -LiteralPath $secretPath }
     catch { throw 'Saved credentials could not be opened for this Windows account. Run again with -Reconfigure.' }
-    if ($credentials.BotToken -isnot [Security.SecureString] -or $credentials.OwnerToken -isnot [Security.SecureString]) {
+    if ($credentials.BotToken -isnot [Security.SecureString]) {
         throw 'Saved credentials are invalid. Run again with -Reconfigure.'
     }
-}
-
-if ($ShowOwnerToken) {
-    if ($null -eq $credentials) { throw 'Run this launcher once to configure your Telegram bot first.' }
-    Write-Host 'Owner sign-in token (private; enter only in your local dashboard):' -ForegroundColor Yellow
-    Write-Host (Read-PlainSecret $credentials.OwnerToken)
-    return
+    # Ignore legacy owner-token data from older launcher versions.
+    $credentials = [pscustomobject]@{ BotToken = $credentials.BotToken }
 }
 
 $newCredentials = $false
@@ -66,19 +60,7 @@ if ($null -eq $credentials) {
     $botSecret = if (-not $Reconfigure -and $env:VIGILANCE_TELEGRAM_BOT_TOKEN) {
         ConvertTo-SecureString $env:VIGILANCE_TELEGRAM_BOT_TOKEN -AsPlainText -Force
     } else { Read-Host 'BotFather token (hidden)' -AsSecureString }
-    $adminPlain = $env:VIGILANCE_TELEGRAM_ADMIN_TOKEN
-    if ($Reconfigure -or [string]::IsNullOrWhiteSpace($adminPlain)) {
-        $randomBytes = New-Object byte[] 32
-        $generator = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-        try { $generator.GetBytes($randomBytes) } finally { $generator.Dispose() }
-        $adminPlain = [Convert]::ToBase64String($randomBytes)
-    }
-    if ($adminPlain.Length -lt 32) { throw 'The existing owner token must contain at least 32 characters.' }
-    $credentials = [pscustomobject]@{
-        BotToken = $botSecret
-        OwnerToken = (ConvertTo-SecureString $adminPlain -AsPlainText -Force)
-    }
-    $adminPlain = $null
+    $credentials = [pscustomobject]@{ BotToken = $botSecret }
     $newCredentials = $true
 }
 
@@ -96,8 +78,6 @@ if ($newCredentials) {
     New-Item -ItemType Directory -Path (Split-Path -Parent $secretPath) -Force | Out-Null
     $credentials | Export-Clixml -LiteralPath $secretPath
     Write-Host 'Credentials saved encrypted for this Windows account under evidence/.' -ForegroundColor Green
-    Write-Host 'Owner sign-in token (private; enter it on Alert recipients):' -ForegroundColor Yellow
-    Write-Host (Read-PlainSecret $credentials.OwnerToken)
 }
 Write-Host ('Telegram bot verified: @' + $bot.username) -ForegroundColor Green
 Write-Host 'Use this bot with only one running RakshaNetra enrollment process.'
@@ -111,20 +91,17 @@ elseif (-not [string]::IsNullOrWhiteSpace($Source)) { $arguments += @('--source'
 if (-not [string]::IsNullOrWhiteSpace($PublicOrigin)) { $arguments += @('--public-origin', $PublicOrigin) }
 
 $previousBot = $env:VIGILANCE_TELEGRAM_BOT_TOKEN
-$previousAdmin = $env:VIGILANCE_TELEGRAM_ADMIN_TOKEN
 $applicationExitCode = 0
 try {
     $env:VIGILANCE_TELEGRAM_BOT_TOKEN = $botPlain
-    $env:VIGILANCE_TELEGRAM_ADMIN_TOKEN = Read-PlainSecret $credentials.OwnerToken
     $botPlain = $null
     Push-Location -LiteralPath $projectRoot
     try {
-        Write-Host "Open http://127.0.0.1:$Port/#recipients and sign in with your owner token."
+        Write-Host "Open http://127.0.0.1:$Port/#recipients and create an opt-in QR."
         & $pythonPath @arguments
         $applicationExitCode = $LASTEXITCODE
     } finally { Pop-Location }
 } finally {
     $env:VIGILANCE_TELEGRAM_BOT_TOKEN = $previousBot
-    $env:VIGILANCE_TELEGRAM_ADMIN_TOKEN = $previousAdmin
 }
 exit $applicationExitCode

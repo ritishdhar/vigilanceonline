@@ -1,0 +1,11 @@
+video_path,label,max_pair_score,scored_pairs,pred
+C:\Users\kultzuki\Coding\Re-Vigilance\Fight-videos\file_000001(1).avi,1,0.5812526345252991,41,0
+C:\Users\kultzuki\Coding\Re-Vigilance\Fight-videos\file_000002.avi,1,0.5003035068511963,3,0
+C:\Users\kultzuki\Coding\Re-Vigilance\Fight-videos\file_000003.avi,1,0.0,0,0
+C:\Users\kultzuki\Coding\Re-Vigilance\Fight-videos\file_000004.avi,1,0.89521723985672,577,1
+C:\Users\kultzuki\Coding\Re-Vigilance\Fight-videos\file_000005.avi,1,0.9267575144767761,479,1
+C:\Users\kultzuki\Coding\Re-Vigilance\No-FIGHT\file_000801.avi,0,0.0,0,0
+C:\Users\kultzuki\Coding\Re-Vigilance\No-FIGHT\file_000802.avi,0,0.36634817719459534,71,0
+C:\Users\kultzuki\Coding\Re-Vigilance\No-FIGHT\file_000803.avi,0,0.0,0,0
+C:\Users\kultzuki\Coding\Re-Vigilance\No-FIGHT\file_000804.avi,0,0.0,0,0
+C:\Users\kultzuki\Coding\Re-Vigilance\No-FIGHT\file_000805.avi,0,0.14442290365695953,117,0

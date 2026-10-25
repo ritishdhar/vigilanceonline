@@ -21,10 +21,15 @@ coverage.xml
 *-results.xml
 /output/
 /tmp/
-/docs/presentations/
-/docs/evaluation/
 *.mp4
 *.mov
 *.avi
 *.mkv
 *.webm
+
+# Bundle supplied demo clips; model weights stay local.
+!samples/*.mp4
+!samples/*.mov
+!samples/*.avi
+!samples/*.mkv
+!samples/*.webm

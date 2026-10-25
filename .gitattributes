@@ -1,0 +1,11 @@
+*.pdf binary
+*.pptx binary
+*.pt binary
+*.pth binary
+*.onnx binary
+*.engine binary
+*.mp4 binary
+*.mov binary
+*.avi binary
+*.mkv binary
+*.webm binary

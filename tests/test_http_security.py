@@ -158,73 +158,54 @@ def test_stalled_capture_is_not_reported_healthy(server):
     assert status["fight_status"] == "ERROR"
 
 
-def test_telegram_recipient_management_requires_owner_sign_in(server, tmp_path):
+def test_telegram_recipient_management_uses_dashboard_session(server, tmp_path):
     from core.telegram_recipients import TelegramEnrollmentBot, TelegramRecipientStore
 
-    port, state = server
-    state.admin_token = "a" * 40
+    _, state = server
     store = TelegramRecipientStore(tmp_path / "recipients.sqlite3")
     bot = TelegramEnrollmentBot("not-a-real-token", store)
     bot.username = "rakshanetra_test_bot"
     state.telegram_enrollment = bot
 
-    code, _, _ = request(server, "/api/telegram/recipients")
-    assert code == 401
+    assert request(server, "/api/telegram/recipients", token=False)[0] == 403
 
-    code, body, headers = request(
-        server,
-        "/api/admin/login",
-        "POST",
-        json.dumps({"password": state.admin_token}).encode(),
-        {"Content-Type": "application/json"},
-    )
+    code, body, _ = request(server, "/api/telegram/recipients")
     assert code == 200
-    cookie = headers["Set-Cookie"].split(";", 1)[0]
-    assert "HttpOnly" in headers["Set-Cookie"]
-    assert "SameSite=Strict" in headers["Set-Cookie"]
-    login = json.loads(body)
-    assert login["ok"] is True
-    assert len(login["admin_session"]) >= 32
-    code, _, _ = request(
-        server,
-        "/api/telegram/recipients",
-        headers={"X-Vigilance-Admin": login["admin_session"]},
-    )
-    assert code == 200
+    assert json.loads(body)["recipients"] == []
 
     code, body, _ = request(
         server,
         "/api/telegram/invite",
         "POST",
         b"{}",
-        {"Cookie": cookie},
+        {"Content-Type": "application/json"},
     )
     invite = json.loads(body)
     assert code == 200
     assert invite["url"].startswith("https://t.me/rakshanetra_test_bot?start=")
     assert invite["qr_data_url"].startswith("data:image/png;base64,")
 
-    code, body, _ = request(
-        server, "/api/telegram/recipients", headers={"Cookie": cookie}
+    assert (
+        request(
+            server,
+            "/api/telegram/invite",
+            "POST",
+            b"{}",
+            {"Content-Type": "application/json"},
+            token=False,
+        )[0]
+        == 403
     )
-    assert code == 200
-    assert json.loads(body)["recipients"] == []
-
-
-def test_telegram_admin_login_rejects_wrong_password(server):
-    _, state = server
-    state.admin_token = "a" * 40
-
-    code, body, _ = request(
-        server,
-        "/api/admin/login",
-        "POST",
-        json.dumps({"password": "wrong"}).encode(),
-        {"Content-Type": "application/json"},
+    assert (
+        request(
+            server,
+            "/api/admin/login",
+            "POST",
+            json.dumps({"password": "not-supported"}).encode(),
+            {"Content-Type": "application/json"},
+        )[0]
+        == 404
     )
-
-    assert code == 401
-    assert json.loads(body)["error"] == "sign-in failed"
 
 
 def test_enrollment_status_explains_missing_setup_without_exposing_credentials(server):
@@ -232,17 +213,13 @@ def test_enrollment_status_explains_missing_setup_without_exposing_credentials(s
     assert code == 200
     data = json.loads(body)
     assert data["configured"] is False
-    assert data["owner_signed_in"] is False
     assert request(server, "/api/telegram/status", token=False)[0] == 403
 
 
-def test_enrollment_status_restores_only_valid_owner_sessions(server, tmp_path):
-    import time
-
+def test_enrollment_status_never_exposes_backend_bot_token(server, tmp_path):
     from core.telegram_recipients import TelegramEnrollmentBot, TelegramRecipientStore
 
     _, state = server
-    state.admin_token = "private-owner-token-" * 3
     bot = TelegramEnrollmentBot(
         "private-bot-token", TelegramRecipientStore(tmp_path / "recipients.sqlite3")
     )
@@ -252,17 +229,5 @@ def test_enrollment_status_restores_only_valid_owner_sessions(server, tmp_path):
     assert code == 200
     assert json.loads(body)["configured"] is True
     assert json.loads(body)["bot_ready"] is True
-    assert json.loads(body)["owner_signed_in"] is False
-    assert b"private-owner-token" not in body
     assert b"private-bot-token" not in body
     assert "recipients" not in json.loads(body)
-
-    state.admin_sessions["test-owner-session"] = time.time() + 60
-    headers = {"Cookie": "vigilance_admin=test-owner-session"}
-    assert json.loads(request(server, "/api/telegram/status", headers=headers)[1])[
-        "owner_signed_in"
-    ]
-    state.admin_sessions["test-owner-session"] = time.time() - 1
-    assert not json.loads(request(server, "/api/telegram/status", headers=headers)[1])[
-        "owner_signed_in"
-    ]

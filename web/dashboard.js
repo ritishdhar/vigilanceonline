@@ -227,7 +227,7 @@ if (typeof document !== "undefined") (() => {
   const {escapeHTML: esc, score, topPairScore, sourceLabel, sourceMode, sourceTime, isCapturing, health} = RakshaUI;
   const $ = id => document.getElementById(id);
   let sessionToken = document.querySelector('meta[name="vigilance-token"]').content;
-  let adminSession = "", sessionBootstrap = null;
+  let sessionBootstrap = null;
   const apiBase = String(window.VIGILANCE_CONFIG?.apiBaseUrl || "").replace(/\/$/, "");
   if (apiBase && new URL(apiBase).protocol !== "https:") throw new Error("Remote API must use HTTPS");
   const endpoint = path => apiBase + path;
@@ -265,19 +265,12 @@ if (typeof document !== "undefined") (() => {
     <article class="panel recipient-panel">
       <div class="panel-heading"><div><h2 id="recipientsHeading">Telegram alert recipients</h2>
       <p class="muted small">People scan your QR, open your bot and tap Start to opt in.</p></div></div>
-      <details class="recipient-help"><summary>How enrollment works</summary><p>Anyone who scans an active QR can receive text incident alerts. QR invites expire after one hour. Recipients can send /stop to unsubscribe. No camera images are sent to enrolled recipients. Phone sounds are controlled by Telegram and device settings.</p></details>
-      <div class="recipient-setup" id="recipientSetup" hidden><strong>Connect your Telegram bot</strong><p>In Telegram, create a bot with <a href="https://t.me/BotFather" target="_blank" rel="noopener noreferrer">@BotFather</a> using <code class="inline-command">/newbot</code>. Stop your running dashboard, then run this in your project’s PowerShell terminal:</p><code>.\\tools\\start_telegram.ps1</code><p>Enter the bot token in the hidden local prompt. The launcher saves encrypted credentials for your Windows account and provides the owner sign-in token. You do not need to publish the dashboard for phone opt-in.</p></div>
-      <form id="recipientLoginForm" class="recipient-login">
-        <label for="recipientAdminToken">Owner sign-in token</label>
-        <input id="recipientAdminToken" type="password" autocomplete="current-password" aria-describedby="recipientLoginHelp" required>
-        <button class="button primary" type="submit">Owner sign in</button>
-        <p id="recipientLoginHelp" class="form-hint">Use the owner token printed by the PowerShell setup. Your BotFather token goes in the terminal prompt. To show your saved owner token locally, run <code>.\\tools\\start_telegram.ps1 -ShowOwnerToken</code>.</p>
-      </form>
+      <details class="recipient-help"><summary>How enrollment works</summary><p>Anyone who scans an active QR can receive text incident alerts. QR invites expire after one hour. Recipients can send /stop to unsubscribe. No camera images are sent to enrolled recipients. Phone sounds are controlled by Telegram and device settings. Anyone with access to this dashboard can manage recipients.</p></details>
+      <div class="recipient-setup" id="recipientSetup" hidden><strong>Connect your Telegram bot</strong><p>In Telegram, create a bot with <a href="https://t.me/BotFather" target="_blank" rel="noopener noreferrer">@BotFather</a> using <code class="inline-command">/newbot</code>. Stop your running dashboard, then run this in your project’s PowerShell terminal:</p><code>.\\tools\\start_telegram.ps1</code><p>Enter the BotFather token in the hidden local prompt. The launcher saves it encrypted for your Windows account and configures the backend; no token is needed in this dashboard. You do not need to publish the dashboard for phone opt-in.</p></div>
       <div id="recipientAdmin" hidden>
         <div class="recipient-actions">
           <button class="button primary" id="createRecipientInvite" type="button">Create opt-in QR</button>
           <button class="button secondary" id="sendRecipientTest" type="button">Send test alert</button>
-          <button class="button secondary" id="recipientLogout" type="button">Sign out</button>
         </div>
         <div id="recipientInvite" class="recipient-invite" hidden>
           <img id="recipientQr" alt="QR code to open the Telegram alert bot">
@@ -304,6 +297,8 @@ if (typeof document !== "undefined") (() => {
   let selectedIncident = null, pendingSource = null, sourceBusy = false, uploadRequest = null;
   let polling = false, pollTimer = null, toastTimer = null, expiredSession = false;
   let capabilities = null, webcamStream = null, webcamToken = "", webcamTimer = null, webcamAttempt = 0;
+  let pendingCautionAction = null, cautionBypassedThisSession = false;
+  try { cautionBypassedThisSession = sessionStorage.getItem("rakshanetra.caution_bypassed") === "true"; } catch (_) {}
   let notificationsEnabled = false, previousNotice = "";
   try { notificationsEnabled = localStorage.getItem("rakshanetra.notifications") === "true"; } catch (_) {}
   const cardNodes = new Map(), rowNodes = new Map(), dialogOpeners = new Map(), sourceAliases = new Map();
@@ -333,6 +328,7 @@ if (typeof document !== "undefined") (() => {
     button.addEventListener("click", () => closeDialog(button.dataset.close)));
   document.querySelectorAll("dialog").forEach(dialog => {
     dialog.addEventListener("close", () => {
+      if (dialog.id === "recipientCautionDialog") pendingCautionAction = null;
       if (dialog.id === "sourceModal" && uploadRequest) uploadRequest.abort();
       if (dialog.id === "sourceModal" && !webcamToken) { stopBrowserCamera(false); setSourceBusy(false); }
       const opener = dialogOpeners.get(dialog.id);
@@ -416,10 +412,17 @@ if (typeof document !== "undefined") (() => {
       icon("camera") + '</span><strong>Add camera source</strong><p>' + caption + '</p><button type="button" class="text-button add-camera-source">' + action + ' ' +
       icon("arrow") + '</button></div><div class="camera-footer"><span>Opens in the active feed</span><span class="slot-mark">' + number + '</span></div>';
     $("cameraGrid").append(article);
-    article.querySelector(".add-camera-source").addEventListener("click", () => openSource(tab));
+    const triggerSource = () => {
+      if (tab === "video" || tab === "webcam") {
+        verifyRecipientBeforeAction(() => openSource(tab));
+      } else {
+        openSource(tab);
+      }
+    };
+    article.querySelector(".add-camera-source").addEventListener("click", triggerSource);
     const reserve = document.createElement("div");
     reserve.innerHTML = '<span class="camera-code">' + number + '</span><strong>' + name + '</strong><button class="text-button">' + action + '</button>';
-    reserve.querySelector("button").addEventListener("click", () => openSource(tab));
+    reserve.querySelector("button").addEventListener("click", triggerSource);
     $("reserveSlots").append(reserve);
   }
   function setLayout(layout) {
@@ -468,12 +471,10 @@ if (typeof document !== "undefined") (() => {
     await ensureSession();
     const controller = new AbortController(), timer = setTimeout(() => controller.abort(), timeout);
     const headers = new Headers(options.headers || {}); headers.set("X-Vigilance-Token", sessionToken);
-    if (adminSession) headers.set("X-Vigilance-Admin", adminSession);
     try { return await fetch(endpoint(url), {...options, headers, credentials: "include", signal: controller.signal, cache: "no-store"}); }
     finally { clearTimeout(timer); }
   }
   let recipientAdminUnlocked = false, recipientRequestPending = false, recipientRefreshAt = 0;
-  let recipientLoginPending = false;
   let recipientStatusPending = false, recipientStatusAt = 0, recipientBotReady = false;
   let recipientInviteExpiresAt = 0, recipientActiveCount = 0;
   const botErrorLabels = {
@@ -506,25 +507,23 @@ if (typeof document !== "undefined") (() => {
     $("sendRecipientTest").disabled = !recipientAdminUnlocked || !recipientBotReady || recipientActiveCount === 0;
   }
   async function loadEnrollmentStatus() {
-    if (recipientStatusPending || recipientLoginPending) return;
+    if (recipientStatusPending) return;
     recipientStatusPending = true;
     try {
       const data = await recipientRequest("/api/telegram/status");
-      if (recipientLoginPending) return;
       const wasUnlocked = recipientAdminUnlocked;
       recipientBotReady = data.bot_ready === true;
-      recipientAdminUnlocked = data.configured && data.owner_signed_in === true;
+      recipientAdminUnlocked = data.configured === true;
       $("recipientSetup").hidden = data.configured;
-      $("recipientLoginForm").hidden = !data.configured || recipientAdminUnlocked;
       $("recipientAdmin").hidden = !recipientAdminUnlocked;
       if (!recipientAdminUnlocked && wasUnlocked) {
         clearRecipientInvite(); $("recipientRows").replaceChildren(); delete $("recipientRows").dataset.signature;
-        recipientMessage("Owner session ended. Sign in again to manage recipients.");
+        recipientMessage("Telegram bot configuration is unavailable. Restart the backend after configuring the bot.");
       }
       if (!data.configured) recipientMessage("Live enrollment is waiting for your bot setup. Follow the local setup steps above.");
-      else if (!recipientBotReady && !recipientAdminUnlocked) recipientMessage(data.bot_error
+      else if (!recipientBotReady) recipientMessage(data.bot_error
         ? botErrorLabels[data.bot_error] || "Telegram connection needs attention. Check the local server."
-        : "Bot connection is pending. You can sign in while it reconnects.");
+        : "Connecting to Telegram bot…");
       recipientControls();
       if (recipientAdminUnlocked) await loadRecipients(true);
     } catch (error) { recipientMessage(error.message, "error"); }
@@ -603,64 +602,14 @@ if (typeof document !== "undefined") (() => {
           : "Connecting to Telegram bot…");
       recipientRefreshAt = Date.now();
     } catch (error) {
-      if (error.status === 401) {
+      if (error.status === 403) {
         recipientAdminUnlocked = false;
         $("recipientAdmin").hidden = true;
-        $("recipientLoginForm").hidden = false;
         clearRecipientInvite();
       }
       recipientMessage(error.message, "error");
     } finally { recipientRequestPending = false; }
   }
-  $("recipientLoginForm").addEventListener("submit", async event => {
-    event.preventDefault();
-    const button = event.currentTarget.querySelector('button[type="submit"]');
-    if (button.disabled) return;
-    button.disabled = true;
-    const password = $("recipientAdminToken").value.trim();
-    if (/^\d+:[A-Za-z0-9_-]{20,}$/.test(password)) {
-      $("recipientAdminToken").value = "";
-      button.disabled = false;
-      recipientMessage("That looks like a BotFather bot token. Enter it in the PowerShell setup prompt, then use the separate owner token printed by the launcher to sign in here.", "error");
-      return;
-    }
-    recipientLoginPending = true;
-    button.textContent = "Signing in…";
-    $("recipientLoginForm").setAttribute("aria-busy", "true");
-    recipientMessage("Checking your owner token…");
-    try {
-      const login = await recipientRequest("/api/admin/login", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({password})
-      });
-      adminSession = login.admin_session || "";
-      const session = await recipientRequest("/api/telegram/status");
-      if (!session.owner_signed_in) throw new Error("Sign-in could not be saved. Allow cookies for this dashboard, reload the page, then try again.");
-      recipientBotReady = session.bot_ready === true;
-      $("recipientAdminToken").value = "";
-      $("recipientLoginForm").hidden = true;
-      $("recipientAdmin").hidden = false;
-      recipientAdminUnlocked = true;
-      recipientRefreshAt = 0;
-      recipientMessage("Owner signed in.", "success");
-      await loadRecipients(true);
-    } catch (error) {
-      recipientMessage(error.status === 401
-        ? "Owner token was not accepted. Use the owner token printed by the PowerShell launcher. Run .\\tools\\start_telegram.ps1 -ShowOwnerToken in your local terminal to retrieve it."
-        : error.name === "AbortError"
-          ? "Sign-in timed out. Check that the dashboard server is running, then try again."
-          : error.status === 403
-            ? "Your dashboard session expired or this address is not allowed. Reload the dashboard at the address printed by the launcher and try again."
-            : error.message, "error");
-    }
-    finally {
-      $("recipientAdminToken").value = "";
-      button.disabled = false; button.textContent = "Owner sign in";
-      $("recipientLoginForm").removeAttribute("aria-busy");
-      recipientLoginPending = false;
-    }
-  });
   $("createRecipientInvite").addEventListener("click", async event => {
     event.currentTarget.disabled = true;
     try {
@@ -694,18 +643,6 @@ if (typeof document !== "undefined") (() => {
     } catch (error) { recipientMessage(error.message, "error"); }
     finally { recipientControls(); }
   });
-  $("recipientLogout").addEventListener("click", async () => {
-    try { await recipientRequest("/api/admin/logout", {method: "POST"}); }
-    catch (error) { recipientMessage(error.message, "error"); return; }
-    recipientAdminUnlocked = false;
-    adminSession = "";
-    $("recipientAdmin").hidden = true;
-    clearRecipientInvite();
-    $("recipientRows").replaceChildren(); delete $("recipientRows").dataset.signature;
-    $("recipientLoginForm").hidden = false;
-    recipientMessage("Signed out.");
-    recipientControls();
-  });
   function updateRecipientInvite() {
     if (!recipientInviteExpiresAt) return;
     const seconds = Math.max(0, Math.ceil((recipientInviteExpiresAt - Date.now()) / 1000));
@@ -715,6 +652,75 @@ if (typeof document !== "undefined") (() => {
     } else text("recipientInviteExpiry", "Tap Start in Telegram to opt in. Invite expires in " +
       Math.floor(seconds / 60) + "m " + String(seconds % 60).padStart(2, "0") + "s.");
   }
+
+  async function checkAlertRecipientsSetup() {
+    if (cautionBypassedThisSession) return true;
+    if (status?.telegram?.has_recipients || (status?.telegram?.recipient_count && status.telegram.recipient_count > 0)) {
+      return true;
+    }
+    if (recipientActiveCount > 0) {
+      return true;
+    }
+    try {
+      const data = await recipientRequest("/api/telegram/status");
+      if (data?.has_recipients || (typeof data?.recipient_count === "number" && data.recipient_count > 0)) {
+        recipientActiveCount = data.recipient_count || 1;
+        return true;
+      }
+    } catch (_) {
+      if (status?.telegram?.has_recipients) return true;
+    }
+    return false;
+  }
+
+  async function verifyRecipientBeforeAction(actionCallback) {
+    let isSetup = false;
+    try {
+      isSetup = await checkAlertRecipientsSetup();
+    } catch (_) {
+      isSetup = false;
+    }
+    if (isSetup) {
+      actionCallback();
+      return;
+    }
+    pendingCautionAction = actionCallback;
+    showDialog("recipientCautionDialog");
+  }
+
+  if ($("cautionSetupRecipient")) {
+    $("cautionSetupRecipient").addEventListener("click", () => {
+      pendingCautionAction = null;
+      closeDialog("recipientCautionDialog");
+      closeDialog("sourceModal");
+      window.location.hash = "#recipients";
+      toast("Set up an alert recipient below or scan the Telegram QR code.", "info");
+      setTimeout(() => {
+        const createButton = $("createRecipientInvite");
+          if (createButton && !createButton.disabled && createButton.offsetParent !== null) {
+            createButton.focus();
+        }
+      }, 250);
+    });
+  }
+
+  if ($("cautionSkipRecipient")) {
+    $("cautionSkipRecipient").addEventListener("click", () => {
+      cautionBypassedThisSession = true;
+      if ($("cautionRememberChoice")?.checked) {
+        try {
+          sessionStorage.setItem("rakshanetra.caution_bypassed", "true");
+        } catch (_) {}
+      }
+      closeDialog("recipientCautionDialog");
+      const action = pendingCautionAction;
+      pendingCautionAction = null;
+      if (typeof action === "function") {
+        action();
+      }
+    });
+  }
+
   function reconnectFeed() {
     if (expiredSession) { window.location.reload(); return; }
     streamFailed = false;
@@ -745,8 +751,18 @@ if (typeof document !== "undefined") (() => {
       $("demoVideos").replaceChildren();
       for (const sample of capabilities.samples || []) {
         const item = document.createElement("div"); item.className = "demo-item";
-        const label = document.createElement("span"); label.textContent = sample.filename; label.title = sample.filename;
-        const run = document.createElement("button"); run.type = "button"; run.textContent = "Run demo";
+        const label = document.createElement("strong"); label.className = "demo-title";
+        label.textContent = sample.name || sample.filename.replace(/\.[^.]+$/, "").replace(/[_-]/g, " "); label.title = sample.filename;
+        const run = document.createElement("button"); run.type = "button"; run.className = "demo-preview";
+        const preview = document.createElement("video"); preview.muted = true; preview.playsInline = true; preview.preload = "metadata";
+        preview.setAttribute("aria-hidden", "true"); preview.tabIndex = -1;
+        preview.src = endpoint("/api/demos/download/" + encodeURIComponent(sample.id)) + "#t=0.1";
+        const fallback = document.createElement("span"); fallback.className = "demo-preview-fallback"; fallback.textContent = "VIDEO PREVIEW";
+        preview.addEventListener("loadeddata", () => { fallback.hidden = true; });
+        preview.addEventListener("error", () => { preview.hidden = true; fallback.hidden = false; });
+        const play = document.createElement("span"); play.className = "demo-play"; play.textContent = "▶"; play.setAttribute("aria-hidden", "true");
+        const action = document.createElement("span"); action.className = "demo-preview-action"; action.textContent = "Run demo";
+        run.append(fallback, preview, play, action);
         run.setAttribute("aria-label", "Run demo " + sample.filename);
         run.addEventListener("click", async () => {
           if (sourceBusy) { toast("A source is already starting."); return; }
@@ -760,7 +776,10 @@ if (typeof document !== "undefined") (() => {
         const download = document.createElement("a"); download.textContent = "Download";
         download.href = endpoint("/api/demos/download/" + encodeURIComponent(sample.id)); download.download = sample.filename;
         download.setAttribute("aria-label", "Download " + sample.filename);
-        item.append(label, run, download); $("demoVideos").append(item);
+        const details = document.createElement("div"); details.className = "demo-details";
+        const description = document.createElement("span"); description.className = "demo-description"; description.textContent = "Ready to analyze";
+        const caption = document.createElement("div"); caption.className = "demo-caption"; caption.append(label, description);
+        details.append(caption, download); item.append(run, details); $("demoVideos").append(item);
       }
       if (!capabilities.samples?.length) $("demoVideos").textContent = "No bundled clips. Upload your own video.";
       $("configuredCamera").replaceChildren(new Option("Enter a stream URL", ""));
@@ -771,7 +790,9 @@ if (typeof document !== "undefined") (() => {
       retry.textContent = "Could not load videos · Retry"; retry.addEventListener("click", loadCapabilities); $("demoVideos").append(retry);
     }
   }
-  $("demoUploadButton").addEventListener("click", () => openSource("video"));
+  $("demoUploadButton").addEventListener("click", () => {
+    verifyRecipientBeforeAction(() => openSource("video"));
+  });
 
   function renderNotificationPreference() {
     const supported = "Notification" in window && window.isSecureContext;
@@ -821,6 +842,37 @@ if (typeof document !== "undefined") (() => {
   $("stopWebcamButton").addEventListener("click", async () => {
     await stopBrowserCamera(); pendingSource = null; setSourceBusy(false); pollBackend(); toast("Webcam stopped.");
   });
+  async function stopMonitoringVideo() {
+    if (webcamStream || webcamToken) {
+      await stopBrowserCamera();
+      pendingSource = null;
+      setSourceBusy(false);
+      pollBackend();
+      toast("Webcam stopped.");
+      return;
+    }
+    if (sourceBusy) return;
+    setSourceBusy(true);
+    setMessage("Stopping video monitoring…");
+    try {
+      const response = await apiFetch("/api/source", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({source: "idle"})
+      }, 10000);
+      const data = await readResponse(response);
+      sourceRequested(data, "idle");
+      toast("Video monitoring stopped.");
+    } catch (e) {
+      setSourceBusy(false);
+      setMessage(e.message, "error");
+      toast("Could not stop video: " + e.message, "error");
+    }
+  }
+  for (const id of ["stopMonitoringButton", "feedStopFloatingButton"]) {
+    const el = $(id);
+    if (el) el.addEventListener("click", stopMonitoringVideo);
+  }
   async function sendWebcamFrame() {
     const token = webcamToken;
     if (!token || !webcamStream) return;
@@ -860,7 +912,10 @@ if (typeof document !== "undefined") (() => {
       setModalTab(order[next], true);
     });
   });
-  for (const id of ["connectButton", "changeSourceButton"]) $(id).addEventListener("click", () => openSource());
+  for (const id of ["connectButton", "changeSourceButton", "feedConnectButton"]) {
+    const el = $(id);
+    if (el) el.addEventListener("click", () => verifyRecipientBeforeAction(() => openSource("video")));
+  }
   $("videoFileInput").addEventListener("change", () => text("uploadLabel", $("videoFileInput").files[0]?.name || "Choose a video to observe"));
   function setSourceBusy(busy) {
     sourceBusy = busy;
@@ -883,14 +938,7 @@ if (typeof document !== "undefined") (() => {
     if (!response.ok) throw new Error(response.status === 403 ? "Your session has expired. Reload the workspace and try again." : data.error || "This source could not be accepted.");
     return data;
   }
-  $("uploadVideoForm").addEventListener("submit", async event => {
-    event.preventDefault(); if (sourceBusy) return;
-    if (!canAnalyze()) return;
-    const file = $("videoFileInput").files[0]; if (!file) return;
-    if (file.size + 4096 > (capabilities?.max_upload_bytes || 256 * 1024 * 1024)) { setMessage("Choose a video slightly smaller than 256 MiB to leave room for upload headers.", "error"); return; }
-    if (!file.size || !/\.(mp4|avi|mov|mkv|webm|mpeg|mpg|m4v|wmv)$/i.test(file.name)) {
-      setMessage("Choose a supported video file: MP4, AVI, MOV, MKV, WebM or MPEG.", "error"); return;
-    }
+  async function performVideoUpload(file) {
     setSourceBusy(true);
     try { await ensureSession(); }
     catch (_) { setSourceBusy(false); setMessage("Cannot connect to the detection server. Try again.", "error"); return; }
@@ -910,12 +958,31 @@ if (typeof document !== "undefined") (() => {
         const data = JSON.parse(request.responseText);
         if (request.status < 200 || request.status >= 300) throw new Error(request.status === 403 ? "Session expired. Reload this workspace." : data.error || "Video upload failed.");
         sourceRequested(data, file.name);
+        setLayout("focus");
+        preferences.layout = "focus";
+        try { localStorage.setItem("rakshanetra.preferences", JSON.stringify(preferences)); } catch (_) {}
       } catch (e) { failed(e.message || "Video upload failed. Try again."); }
     });
     request.addEventListener("error", () => failed("Upload interrupted. Check the connection and try again."));
     request.addEventListener("timeout", () => failed("Upload timed out. Try a smaller video."));
     request.addEventListener("abort", () => failed("Upload cancelled. No new source was confirmed."));
     request.send(form);
+  }
+
+  $("uploadVideoForm").addEventListener("submit", async event => {
+    event.preventDefault(); if (sourceBusy) return;
+    if (!canAnalyze()) return;
+    const file = $("videoFileInput").files[0]; if (!file) return;
+    if (file.size + 4096 > (capabilities?.max_upload_bytes || 256 * 1024 * 1024)) { setMessage("Choose a video slightly smaller than 256 MiB to leave room for upload headers.", "error"); return; }
+    if (!file.size || !/\.(mp4|avi|mov|mkv|webm|mpeg|mpg|m4v|wmv)$/i.test(file.name)) {
+      setMessage("Choose a supported video file: MP4, AVI, MOV, MKV, WebM or MPEG.", "error"); return;
+    }
+    verifyRecipientBeforeAction(() => {
+      setLayout("focus");
+      preferences.layout = "focus";
+      try { localStorage.setItem("rakshanetra.preferences", JSON.stringify(preferences)); } catch (_) {}
+      performVideoUpload(file);
+    });
   });
   $("cancelUploadButton").addEventListener("click", () => uploadRequest?.abort());
   $("sourceModal").addEventListener("cancel", event => {
@@ -935,11 +1002,10 @@ if (typeof document !== "undefined") (() => {
   }
   $("serverCameraButton").addEventListener("click", () => {
     if (!/^[0-9]$/.test($("webcamIndex").value)) { setMessage("Choose a camera index from 0 to 9.", "error"); return; }
-    submitSource($("webcamIndex").value);
+    verifyRecipientBeforeAction(() => submitSource($("webcamIndex").value));
   });
-  $("webcamForm").addEventListener("submit", async e => {
-    e.preventDefault(); if (sourceBusy || !canAnalyze()) return;
-    if (!navigator.mediaDevices?.getUserMedia || !window.isSecureContext) { setMessage("Webcam access requires HTTPS or localhost and a browser with camera support.", "error"); return; }
+
+  async function performWebcamStart() {
     await stopBrowserCamera(); const attempt = ++webcamAttempt;
     setSourceBusy(true); setMessage("Allow camera access in your browser to begin. Audio is off.");
     let stream;
@@ -963,6 +1029,12 @@ if (typeof document !== "undefined") (() => {
       const message = error.name === "NotAllowedError" ? "Camera access was denied. Allow it in browser settings, or upload a video." : error.name === "NotFoundError" ? "No camera found on this device. Upload a video instead." : error.name === "NotReadableError" ? "Camera is busy. Close other apps using it and retry." : error.message;
       setMessage(message, "error"); toast(message, "error");
     }
+  }
+
+  $("webcamForm").addEventListener("submit", async e => {
+    e.preventDefault(); if (sourceBusy || !canAnalyze()) return;
+    if (!navigator.mediaDevices?.getUserMedia || !window.isSecureContext) { setMessage("Webcam access requires HTTPS or localhost and a browser with camera support.", "error"); return; }
+    verifyRecipientBeforeAction(() => performWebcamStart());
   });
   $("configuredCamera").addEventListener("change", () => { $("rtspUrl").disabled = Boolean($("configuredCamera").value); });
   $("rtspForm").addEventListener("submit", e => {
@@ -979,10 +1051,16 @@ if (typeof document !== "undefined") (() => {
     if ((s.error && correctGeneration) || Date.now() - pendingSource.requestedAt > 60000) {
       setMessage(s.error ? "Source could not start: " + s.error : "No new source was confirmed. Check camera health or try again.", "error");
       pendingSource = null; setSourceBusy(false);
+    } else if (pendingSource.expected === "idle" && (s.source === "idle" || !s.running) && correctGeneration) {
+      pendingSource = null; setSourceBusy(false); setMessage("Video monitoring stopped.", "neutral");
+      reconnectFeed(); toast("Video monitoring stopped.");
     } else if (isCapturing(s) && s.source === pendingSource.expected && changed && Number(s.frame) >= 0) {
       pendingSource = null; setSourceBusy(false); setMessage("First frame received. Your source is connected.", "success");
       closeDialog("sourceModal"); window.location.hash = "monitoring";
       reconnectFeed(); toast("Primary camera source connected.");
+      setLayout("focus");
+      preferences.layout = "focus";
+      try { localStorage.setItem("rakshanetra.preferences", JSON.stringify(preferences)); } catch (_) {}
     }
   }
 
@@ -1201,6 +1279,9 @@ if (typeof document !== "undefined") (() => {
     $("primaryCameraState").dataset.tone = sourceHealthy && streamFailed ? "warning" : h.tone;
     text("sourceName", displaySource()); text("sourceClock", sourceTime(status.ts));
     text("feedMode", !connected ? "LAST RECEIVED" : status.ended ? "VIDEO COMPLETE" : stale ? "LAST RECEIVED" : sourceMode(status).toUpperCase());
+    const hasActiveVideo = (connected && !stale && isCapturing(status)) || Boolean(webcamStream) || (connected && status.running && status.source && status.source !== "idle");
+    if ($("stopMonitoringButton")) $("stopMonitoringButton").hidden = !hasActiveVideo;
+    if ($("feedStopFloatingButton")) $("feedStopFloatingButton").hidden = !hasActiveVideo;
   }
   function renderHealth() {
     const h = health(status, connected, stale);

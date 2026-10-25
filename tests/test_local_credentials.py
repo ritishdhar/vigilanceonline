@@ -12,20 +12,22 @@ def test_absent_credentials_leave_manual_configuration_unchanged(tmp_path):
 @pytest.mark.skipif(
     local_credentials.os.name != "nt", reason="Windows credential format"
 )
-def test_saved_credentials_read_secure_string_fields_only(tmp_path, monkeypatch):
+def test_saved_credentials_load_backend_bot_token_and_ignore_legacy_owner_token(
+    tmp_path, monkeypatch
+):
     path = tmp_path / "credentials.xml"
     path.write_text(
         '<Objs xmlns="http://schemas.microsoft.com/powershell/2004/04"><Obj><MS><SS N="BotToken">aa</SS><SS N="OwnerToken">bb</SS></MS></Obj></Objs>'
     )
-    monkeypatch.setattr(
-        local_credentials,
-        "_decrypt",
-        lambda value: {"aa": "test-bot", "bb": "x" * 32}[value],
-    )
-    assert local_credentials.load_telegram_credentials(path) == {
-        "bot": "test-bot",
-        "owner": "x" * 32,
-    }
+    decrypted = []
+
+    def decrypt(value):
+        decrypted.append(value)
+        return {"aa": "test-bot", "bb": "x" * 32}[value]
+
+    monkeypatch.setattr(local_credentials, "_decrypt", decrypt)
+    assert local_credentials.load_telegram_credentials(path) == {"bot": "test-bot"}
+    assert decrypted == ["aa"]
 
 
 @pytest.mark.skipif(

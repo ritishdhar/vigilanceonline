@@ -24,6 +24,8 @@ def redact_source(source):
 
 def authorize_source(source, upload_dir, allowed_sources=()):
     text = str(source)
+    if text == "idle":
+        return text
     if text.isdigit() and 0 <= int(text) <= 9:
         return text
     if text in allowed_sources:

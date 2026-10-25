@@ -250,7 +250,6 @@ def test_dashboard_sender_uses_the_live_enrollment_store(tmp_path, monkeypatch):
     import ui
 
     monkeypatch.setenv("VIGILANCE_TELEGRAM_BOT_TOKEN", "not-a-real-token")
-    monkeypatch.setenv("VIGILANCE_TELEGRAM_ADMIN_TOKEN", "owner-token-" * 4)
     monkeypatch.setenv(
         "VIGILANCE_TELEGRAM_RECIPIENTS_DB", str(tmp_path / "recipients.sqlite3")
     )
