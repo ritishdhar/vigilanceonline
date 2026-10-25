@@ -1,0 +1,14 @@
+# Re-resolve deliberately, then commit the complete requirements-cpu.lock.
+--extra-index-url https://download.pytorch.org/whl/cpu
+numpy==2.5.4
+opencv-python==5.0.0.93
+python-multipart==0.0.32
+qrcode[pil]==8.2
+torch==2.14.1+cpu
+torchvision==0.29.1+cpu
+ultralytics==8.4.183
+lap>=0.5.12
+pytest==9.1.1
+pytest-cov==7.1.0
+coverage==7.17.0
+ruff==0.17.1

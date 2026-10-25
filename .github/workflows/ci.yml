@@ -1,0 +1,53 @@
+name: Validate application
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-unit.lock
+      - run: python -m pip install -r requirements-unit.lock
+      - run: python -m ruff check core scenarios config.py main.py ui.py replay.py eval_fight.py model_smoke_test.py tests tools
+      - run: python -m ruff format --check core scenarios config.py main.py ui.py replay.py eval_fight.py model_smoke_test.py tests tools
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: node --check web/dashboard.js
+      - run: npm install --prefix .runtime-tests/ui-dom jsdom@30.1.3 --ignore-scripts --no-audit --no-fund
+      - shell: pwsh
+        run: |
+          $env:NODE_PATH = (Resolve-Path '.runtime-tests/ui-dom/node_modules').Path
+          node --test tests/frontend.test.cjs tests/dashboard_dom.test.cjs
+      - run: python tools/run_checks.py tests -q --cov=core --cov=scenarios --cov=config --cov=ui --cov=main --cov=eval_fight --cov-branch --cov-fail-under=60 --cov-report=term --cov-report=xml:coverage.xml --junitxml=unit-results.xml
+
+  release-models:
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: windows-2025
+    env:
+      FIGHT_MODEL_URL: ${{ secrets.FIGHT_MODEL_URL }}
+      BACKBONE_MODEL_URL: ${{ secrets.BACKBONE_MODEL_URL }}
+      POSE_MODEL_URL: ${{ secrets.POSE_MODEL_URL }}
+      OBJECT_MODEL_URL: ${{ secrets.OBJECT_MODEL_URL }}
+      ULTRALYTICS_SAFE_LOAD: '1'
+      YOLO_AUTOINSTALL: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-cpu.lock
+      - run: python -m pip install -r requirements-cpu.lock
+      - run: python tools/verify_models.py --download --inference --auxiliary
+      - run: python tools/run_checks.py tests -q --cov=core --cov=scenarios --cov=config --cov=ui --cov=main --cov=eval_fight --cov-branch --cov-fail-under=70 --cov-report=term --cov-report=xml:coverage.xml --junitxml=model-results.xml

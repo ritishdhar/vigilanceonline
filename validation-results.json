@@ -1,0 +1,34 @@
+{
+  "tests": 175,
+  "passed": 174,
+  "skipped": 1,
+  "failures": 0,
+  "errors": 0,
+  "line_coverage_percent": 80.79,
+  "branch_coverage_percent": 67.13,
+  "lightweight_passed": 157,
+  "lightweight_skipped": 18,
+  "model_verification": "four manifest hashes, ST-GCN++ numerical and preprocessing fixtures, both YOLO detectors, tracker reset, pinned auxiliary checksum and restricted CPU inference passed",
+  "browser": "headless Edge rendering, no JS errors, authenticated mutation, real incident timeline bins passed",
+  "preprocessing_benchmark_ms": {
+    "reference_16_pairs": 166.399,
+    "optimized_16_pairs": 21.872
+  },
+  "limitations": [
+    "CUDA unavailable",
+    "Physical-camera validation not performed",
+    "Labeled deployment accuracy not measured",
+    "Remote GitHub Actions run requires repository configuration and model URL secrets"
+  ],
+  "cleanup": {
+    "nested_project_removed": true,
+    "nonempty_duplicate_files": 0,
+    "model_location": "models/",
+    "sample_video": "samples/test1.mp4",
+    "legacy_bilstm_removed": true,
+    "temporary_dependencies_removed": true,
+    "gpu_setup": "SETUP.md",
+    "gpu_test_command": "python tools/verify_models.py --inference --auxiliary --device cuda"
+  },
+  "lightweight_combined_coverage_percent": 70.93
+}

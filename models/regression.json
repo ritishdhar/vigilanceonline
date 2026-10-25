@@ -1,0 +1,14 @@
+{
+  "fixture": "float32 zeros with shape (1,2,100,17,3)",
+  "checkpoint_sha256": "7a21898c6e140b04e51c1c3789340fec4927a66d9de524b1737dc32648301db9",
+  "torch": "2.14.1+cpu",
+  "zero_tensor_probabilities": [
+    0.07512453198432922
+  ],
+  "absolute_tolerance": 0.0001,
+  "purpose": "Deterministic loading and numerical regression; not an accuracy measurement.",
+  "pair_tensor_sha256": "bd97a197d0a2a2ddac99aa8aff549484387b269f50efc1f8be35481406ee06eb",
+  "pair_probabilities": [
+    0.0005763557273894548
+  ]
+}

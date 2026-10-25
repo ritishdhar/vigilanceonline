@@ -1,0 +1,18 @@
+{
+  "models/stgcnpp/best_fight_stgcnpp_v1.pth": {
+    "sha256": "7a21898c6e140b04e51c1c3789340fec4927a66d9de524b1737dc32648301db9",
+    "url_env": "FIGHT_MODEL_URL"
+  },
+  "models/stgcnpp/j.pth": {
+    "sha256": "b274888dd5b7bd8552ce4e3c3073973af84fa0fd18fd94363eac25457f225992",
+    "url_env": "BACKBONE_MODEL_URL"
+  },
+  "models/yolo/yolo26m-pose.pt": {
+    "sha256": "2fbf16367022256a226035695c5c389384c6706e8bb8ab8fcd0e7976f05443c4",
+    "url_env": "POSE_MODEL_URL"
+  },
+  "models/yolo/yolo26m.pt": {
+    "sha256": "401cea9ab23ad19246ff7744859816bc599f350e93c9dd30367b6f0a0745d0b7",
+    "url_env": "OBJECT_MODEL_URL"
+  }
+}

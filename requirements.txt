@@ -1,0 +1,10 @@
+# Runtime. Install matching GPU-enabled torch/torchvision first; see SETUP.md.
+# Version pins accept CUDA local-version suffixes and never force a CPU wheel index.
+numpy==2.5.4
+opencv-python==5.0.0.93
+python-multipart==0.0.32
+torch==2.14.1
+torchvision==0.29.1
+ultralytics==8.4.183
+lap==0.5.13
+qrcode[pil]==8.2

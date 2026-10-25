@@ -1,0 +1,11 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = [".venv", ".runtime-tests"]
+markers = ["integration: requires the approved real model artifacts"]
+
+[tool.ruff]
+target-version = "py312"
+exclude = [".venv", ".runtime-tests"]
+
+[tool.ruff.lint]
+select = ["F", "E9"]
