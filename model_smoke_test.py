@@ -1,7 +1,7 @@
-"""ST-GCN++ model smoke test: python model_smoke_test.py [--checkpoint PATH] [--device auto|cpu|cuda].
+"""ST-GCN++ CUDA smoke test: python model_smoke_test.py [--checkpoint PATH].
 
 Performs a REAL forward pass through the vendored PYSKL-compatible
-ST-GCN++ backbone + VIGLANCE 2-class head when torch is available, loading
+ST-GCN++ backbone + VIGLANCE 2-class head when CUDA is available, loading
 official NTU60 backbone weights when the checkpoint is present. Reports
 environment, load result, output shapes, timings, and batch benchmarks.
 The output reports whether the loaded checkpoint contains a trained fight
@@ -12,6 +12,7 @@ import argparse
 import os
 import sys
 import time
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -36,7 +37,7 @@ def env_report():
             print(f"gpu: {torch.cuda.get_device_name(0)}")
             print(f"cuda_version: {torch.version.cuda}")
     except ImportError:
-        print("torch: MISSING - install torch (CPU builds suffice)")
+        print("torch: MISSING - install CUDA-enabled PyTorch; see SETUP.md")
     for mod in ("mmcv", "mmengine", "pyskl", "cv2", "ultralytics"):
         try:
             m = __import__(mod)
@@ -46,14 +47,21 @@ def env_report():
 
 
 def main(argv=None):
+    from core.gpu import cuda_device_name
+    from core.paths import resolve_asset
+
     ap = argparse.ArgumentParser(description="VIGLANCE ST-GCN++ model smoke test")
     ap.add_argument("--checkpoint", default="models/stgcnpp/best_fight_stgcnpp_v1.pth")
-    ap.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
+    ap.add_argument("--device", default="cuda", type=cuda_device_name)
     ap.add_argument("--batches", default="1,2,4,8")
     args = ap.parse_args(argv)
 
     print("== environment ==")
     env_report()
+
+    if not Path(resolve_asset(args.checkpoint)).is_file():
+        print(f"checkpoint: MISSING - {args.checkpoint}")
+        return 2
 
     try:
         import torch  # noqa
@@ -64,7 +72,11 @@ def main(argv=None):
     from core.stgcn_adapter import STGCNPPAdapter
 
     ad = STGCNPPAdapter(device=args.device)
-    dev_requested = ad.resolve_device()
+    try:
+        dev_requested = ad.resolve_device()
+    except (ImportError, RuntimeError) as exc:
+        print(f"ABORT: {exc}")
+        return 2
     print(f"== device: {dev_requested} ==")
 
     t0 = time.perf_counter()
@@ -84,11 +96,7 @@ def main(argv=None):
 
     torch.manual_seed(0)
     np.random.seed(0)
-    print(
-        "== forward / batch benchmark (CPU"
-        + (", CUDA" if dev_requested == "cuda" else "")
-        + ") =="
-    )
+    print(f"== forward / batch benchmark ({dev_requested}) ==")
     for n in [int(x) for x in args.batches.split(",")]:
         x = np.random.rand(n, 2, ad.temporal_length, 17, 3).astype(np.float32)
         t0 = time.perf_counter()

@@ -11,7 +11,7 @@ Foundational fixes vs the legacy ``core/detector.py``:
 4. Track/keypoint pairing is index-atomic via
    ``tracked_person.pair_detections`` (single loop, no split lists).
 5. ``ultralytics`` is imported lazily inside the constructor so importing
-   this module (tests, config inspection, Kaggle CPU checks) never
+   this module (tests and config inspection) never
    requires torch/ultralytics. Construction raises an informative error.
 6. Multi-person: the scene is NEVER truncated to 2 people. ``max_people``
    is a high safety cap only (default 32, configurable); the registry
@@ -30,13 +30,12 @@ from typing import Any, Callable, List
 import numpy as np
 
 from core.logging_utils import get_logger
+from core.gpu import cuda_device_name
 from core.model_security import load_yolo
 from core.paths import resolve_asset
 from core.tracked_person import DEFAULT_MAX_PEOPLE, TrackedPerson, pair_detections
 
 log = get_logger("detector")
-
-REPO_ROOT_CANDIDATES = ("VIGILANCE_POSE_WEIGHTS", "VIGILANCE_DET_WEIGHTS")
 
 PRIMARY_TRACKER = "botsort.yaml"
 FALLBACK_TRACKER = "bytetrack.yaml"
@@ -95,7 +94,7 @@ class Detector:
         fallback_tracker: str = FALLBACK_TRACKER,
         conf: float = 0.25,
         imgsz: int = 640,
-        device: str = "auto",
+        device: str = "cuda",
         max_people: int = DEFAULT_MAX_PEOPLE,
         load_object_model: bool = True,
     ):
@@ -106,7 +105,7 @@ class Detector:
         self._fallback_engaged = False
         self.conf = float(conf)
         self.imgsz = int(imgsz)
-        self.device = None if device == "auto" else device
+        self.device = cuda_device_name(device)
         self.max_people = int(max_people)
 
         pose_path = resolve_model_path(pose_model_path, "VIGILANCE_POSE_WEIGHTS")

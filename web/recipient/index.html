@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#ffffff">
+  <link rel="manifest" href="/recipient/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/recipient/icon-192.png">
+  <link rel="icon" href="/recipient/icon-192.png">
+  <link rel="stylesheet" href="/recipient/style.css">
+  <script src="/recipient/alarm.js" defer></script>
+  <script src="/recipient/app.js" defer></script>
+  <script src="/recipient/scanner.js" defer></script>
+  <title>RakshaNetra · Incident response</title>
+</head>
+<body>
+  <header class="masthead">
+    <div class="masthead-inner">
+      <a class="brand" href="/recipient/" aria-label="RakshaNetra incident response">
+        <img src="/recipient/brand.png" alt="RakshaNetra" width="751" height="251">
+      </a>
+    </div>
+  </header>
+  <dialog id="incomingAlert" class="incoming-alert" aria-labelledby="incomingAlertTitle" aria-describedby="incomingAlertBody" hidden>
+    <div class="alarm-symbol" aria-hidden="true">!</div>
+    <p class="alert-eyebrow" id="incomingAlertCount">Incoming alert</p>
+    <h2 id="incomingAlertTitle"></h2>
+    <p id="incomingAlertBody"></p>
+    <p id="incomingAlertLocation" class="alert-location"></p>
+    <p id="incomingAlarmStatus" class="hint" role="status"></p>
+    <button id="incomingAlertAcknowledge" class="primary" type="button">Acknowledge</button>
+    <a id="incomingAlertOpen" class="alert-evidence-link">View incident</a>
+    <div class="alert-secondary-actions">
+      <button id="incomingAlertSilence" type="button">Silence</button>
+      <button id="incomingAlertClose" type="button" aria-label="Dismiss alert">Dismiss</button>
+    </div>
+  </dialog>
+  <main id="installScreen" class="install-screen" hidden>
+    <section class="panel install-card" aria-labelledby="installTitle">
+      <h1 id="installTitle">Install RakshaNetra</h1>
+      <p class="hint">Add RakshaNetra to your home screen, then open it from there.</p>
+      <button id="installFromScreen" class="primary" type="button" hidden>Install app</button>
+      <div id="installInstructions" class="install-instructions">
+        <p><strong>iPhone</strong><span>In Safari, tap Share, then Add to Home Screen.</span></p>
+        <p><strong>Android</strong><span>In Chrome, open the menu and tap Install app or Add to Home screen.</span></p>
+      </div>
+      <p id="installStatus" class="hint" role="status"></p>
+      <button id="retryInvite" type="button" hidden>Retry linking</button>
+    </section>
+  </main>
+  <main id="appScreen" hidden>
+    <p id="message" class="message" role="status">Connecting…</p>
+    <button id="retryConnection" class="compact" type="button" hidden>Retry connection</button>
+    <section id="connectionCard" class="connection-card" aria-label="Connected workspace" hidden>
+      <div class="connection-copy">
+        <p class="connection-status"><span class="connection-dot" aria-hidden="true"></span><span id="connectionState">Connected</span></p>
+        <strong id="connectionWorkspace"></strong>
+        <span id="connectionDevice"></span>
+      </div>
+      <button id="disconnect" type="button" class="disconnect-button">Disconnect</button>
+    </section>
+    <section class="panel pairing" id="enrollment" hidden aria-labelledby="pairingTitle">
+      <div class="pairing-intro">
+        <span class="feature-icon" aria-hidden="true"><span class="scan-symbol"></span></span>
+        <h1 id="pairingTitle">Connect your phone</h1>
+        <p class="hint">Scan a one-time invite from <strong>Alert recipients</strong> on your dashboard.</p>
+        <button id="scanInvite" class="primary" type="button"><span class="scan-symbol" aria-hidden="true"></span>Scan QR code</button>
+      </div>
+      <form id="enrollForm">
+        <label for="invite">Invite code or link</label>
+        <div class="field-actions">
+          <input id="invite" required maxlength="400" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Scan or paste your invite">
+          <button id="copyInvite" type="button" class="compact" hidden>Copy invite code</button>
+        </div>
+        <p id="inviteStatus" class="hint field-status" role="status"></p>
+        <button type="submit" class="primary connect-button">Connect device</button>
+      </form>
+    </section>
+    <section id="inbox" hidden>
+      <div class="section-heading">
+        <h1 id="inboxTitle">Incident inbox</h1>
+        <div class="inbox-actions" role="group" aria-label="Inbox actions">
+          <button id="previewAlert" class="inbox-icon preview-button" type="button" aria-label="Preview alert" title="Preview alert">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4M10 8l4 2-4 2z"/></svg>
+          </button>
+          <button id="clearAlerts" class="inbox-icon clear-button" type="button" aria-label="Clear all alerts" title="Clear all alerts" disabled>
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></svg>
+          </button>
+          <button id="refresh" class="inbox-icon refresh-button" type="button" aria-label="Refresh incidents" title="Refresh incidents">
+            <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 10a8 8 0 1 0-1.7 7M20 4v6h-6"/></svg>
+          </button>
+        </div>
+      </div>
+      <p id="inboxSummary" class="inbox-summary"></p>
+      <p class="panel" id="empty">Waiting for an incident.</p>
+      <ol id="incidents" class="incidents" aria-label="Recent incidents"></ol>
+    </section>
+    <section id="detail" class="panel incident-detail" hidden aria-labelledby="incidentTitle">
+      <a href="/recipient/" id="back" class="back-link">← Incidents</a>
+      <p id="incidentLabel" class="incident-label"></p>
+      <h1 id="incidentTitle" tabindex="-1"></h1>
+      <p id="incidentReviewStatus" class="review-status"></p>
+      <section class="evidence-panel" aria-labelledby="evidenceHeading">
+        <div class="evidence-heading"><h2 id="evidenceHeading">Incident video</h2><span id="evidenceState" class="evidence-state"></span></div>
+        <button id="openProtectedEvidence" class="primary" type="button" hidden>Open video &amp; photos</button>
+        <p id="protectedEvidenceStatus" class="hint" hidden>Sign in with your approved email to view camera evidence.</p>
+        <video id="clip" controls playsinline muted preload="metadata" hidden></video>
+        <button id="retryClip" type="button" hidden>Retry video</button>
+        <div id="videoPlaceholder" class="evidence-placeholder">
+          <span aria-hidden="true">▷</span><p id="clipStatus" class="hint" role="status"></p>
+        </div>
+      </section>
+      <section id="stillsPanel" class="detail-section" aria-labelledby="stillsHeading" hidden>
+        <h2 id="stillsHeading">Incident photos</h2>
+        <div id="stills" class="incident-stills"></div>
+        <div id="stillsPlaceholder" class="evidence-placeholder photo-placeholder">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="8" cy="9" r="1"/><path d="m4 17 5-4 3 2 4-4 4 4"/></svg>
+          <p id="stillsStatus" class="hint"></p>
+        </div>
+      </section>
+      <dl id="incidentFacts"></dl>
+      <section class="detail-section" aria-labelledby="responseHeading">
+        <h2 id="responseHeading">Response</h2>
+        <label for="note">Response note</label>
+        <textarea id="note" rows="3" maxlength="500" placeholder="Optional"></textarea>
+        <div class="button-row" id="reviews">
+          <button type="button" class="primary" data-review="acknowledged">Acknowledge</button>
+          <button type="button" data-review="false-positive">False positive</button>
+          <button type="button" data-review="resolved">Resolve</button>
+        </div>
+        <p id="handoffStatus" class="hint"></p>
+        <div class="button-row">
+          <button id="forward" type="button" hidden>Forward to campus security</button>
+          <a id="emergency" class="call-link" hidden></a>
+        </div>
+      </section>
+      <section class="detail-section" aria-labelledby="activityHeading">
+        <h2 id="activityHeading">Activity</h2>
+        <ol id="activity" class="activity"></ol>
+      </section>
+    </section>
+  </main>
+  <dialog id="confirmDisconnect" aria-labelledby="disconnectHeading">
+    <h2 id="disconnectHeading">Disconnect this phone?</h2>
+    <p class="hint">Alert delivery will stop for this device. Scan a new dashboard invite to connect again.</p>
+    <form method="dialog" class="dialog-actions">
+      <button value="cancel">Keep connected</button>
+      <button value="disconnect" class="primary">Disconnect</button>
+    </form>
+  </dialog>
+  <dialog id="qrDialog" aria-labelledby="qrHeading">
+    <h2 id="qrHeading">Scan a phone invite</h2>
+    <div class="scanner-preview">
+      <video id="qrCamera" autoplay playsinline muted aria-hidden="true"></video>
+      <div class="scan-guide" aria-hidden="true"></div>
+    </div>
+    <p id="scannerStatus" class="hint" role="status"></p>
+    <form method="dialog" class="dialog-actions">
+      <button value="manual">Enter code instead</button>
+      <button value="cancel">Cancel</button>
+    </form>
+  </dialog>
+  <dialog id="stillDialog" class="still-dialog" aria-labelledby="stillHeading">
+    <h2 id="stillHeading"></h2>
+    <img id="enlargedStill" alt="">
+    <form method="dialog" class="dialog-actions">
+      <button type="submit">Close photo</button>
+    </form>
+  </dialog>
+  <dialog id="confirmClearAlerts" aria-labelledby="clearAlertsTitle" aria-describedby="clearAlertsDescription">
+    <form method="dialog">
+      <h2 id="clearAlertsTitle">Clear all alerts?</h2>
+      <p id="clearAlertsDescription">This clears your device’s inbox. Recordings stay on the dashboard, and new alerts will still arrive.</p>
+      <div class="dialog-actions">
+        <button value="cancel">Keep alerts</button>
+        <button value="clear" class="primary" id="confirmClearButton">Clear all</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="confirmHandoff">
+    <form method="dialog">
+      <h2>Forward to campus security?</h2>
+      <p>Enrolled campus responders will receive this incident and its available evidence.</p>
+      <div class="button-row">
+        <button value="cancel">Cancel</button>
+        <button value="send" class="primary">Forward incident</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>

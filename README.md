@@ -1,29 +1,28 @@
-# Re-Vigilance
+# JammuUniversity · RakshaNetra
 
 Local video surveillance prototype: YOLO pose tracking, pairwise ST-GCN++ fight inference, graph aggregation, and configurable fall, bag, and auxiliary threat detection.
 
-## Live app and video demo
-
-- [Open the live app](https://64.176.96.46.sslip.io/)
-- [Watch the video demo](https://youtu.be/Y2ciu2KUWQo)
-
 ## Run
 
-Use Python 3.12 on Windows. For the GPU laptop, follow [SETUP.md](SETUP.md) to install GPU-enabled PyTorch first; runtime requirements do not force CPU wheels. Real inference also requires the approved model artifacts listed in [models/manifest.json](models/manifest.json) and a camera or video source.
+Use Python 3.12 on Windows with an NVIDIA CUDA GPU. Follow [SETUP.md](SETUP.md) to install GPU-enabled PyTorch first. Real inference also requires the approved model artifacts listed in [models/manifest.json](models/manifest.json) and a camera or video source.
 
 ```powershell
-python ui.py --config config/default.json --source samples/test1.mp4
+python ui.py --config config/default.json --source idle --require-gpu
 ```
 
-Open the loopback URL printed by the UI. Use `--source 0` for a camera. `device: auto` selects CUDA when available. A synthetic demo needs only `requirements-unit.lock`:
+Open the loopback URL printed by the UI and connect a camera or upload an approved clip. Use `--source 0` to open a camera at launch. Inference requires CUDA; `device: auto` also resolves to CUDA and never falls back to host inference. A synthetic demo needs only `requirements-unit.lock`:
 
 ```powershell
 python ui.py --synthetic
 ```
 
-The public Git repository intentionally excludes model-weight binaries and video clips. Provision approved weights and any shareable test video separately; without the model artifacts, fight detection remains explicitly unavailable. The synthetic demo does not run real model inference.
+Model-weight binaries are excluded from Git. Provision the approved weights separately; without them, real detection is unavailable. The synthetic demo does not load real models, even when weights are installed.
 
-There is one application at the project root. `core/` owns processing, `scenarios/` owns fall/bag rules, `web/` owns the dashboard, `config/` holds defaults, and `tests/` and `tools/` hold validation and utilities. Model metadata lives in `models/`; provisioned weights and sample videos are not committed. The unused BiLSTM path, compatibility launchers and duplicate nested project have been removed.
+Open **Alert recipients** to enroll phones. The recipient app supports private
+incident clips, shared reviews, and handoff to enrolled campus security devices.
+See [phone setup](SETUP.md#phone-incident-response) for HTTPS and Web Push.
+
+There is one application at the project root. `core/` owns processing, `scenarios/` owns fall/bag rules, `web/` owns the dashboard, `config/` holds defaults, and `tests/` and `tools/` hold validation and utilities. Model integrity metadata and numerical fixtures live in `models/`.
 
 ## Architecture and behavior
 
@@ -33,7 +32,7 @@ There is one application at the project root. `core/` owns processing, `scenario
 - `core/pairs.py`, `core/stgcn_adapter.py`, `core/graph.py`: bounded temporal histories, vectorized resampling/normalization, configurable inference cadence, scene candidates.
 - `core/replay.py`: complete canonical evidence and tolerant field-level comparisons; streaming evidence output.
 - `core/http_server.py`, `core/video_upload.py`: authenticated local control, bounded connections, streaming uploads and owned-file cleanup.
-- `core/alert_dispatch.py`: opt-in Telegram delivery through a bounded background queue with stable incident IDs and retry backoff.
+- `core/phone_push.py`: Web Push delivery through a persistent outbox with retry backoff.
 - `web/`: separate dashboard HTML, CSS and JavaScript. Synthetic helpers live in `core/demo.py`.
 
 Fight health is `UNAVAILABLE`, `WARMING_UP`, `ASSESSED`, `ERROR`, or `DISABLED`. Missing models and insufficient observations never imply `NO_FIGHT`. Group labels describe undirected interaction-graph candidates, not established attacker/victim roles.
@@ -48,21 +47,21 @@ Uploads are limited to 256 MiB each and 512 MiB per session. Only application-ow
 
 Model deserialization never retries unrestricted pickle. YOLO requires the locked runtime's restricted loader, and runtime package auto-installation is disabled. The auxiliary artifact uses a fixed revision and SHA-256 with atomic verified downloads. `models/manifest.json` identifies the four release artifacts; `models/regression.json` records a deterministic numerical fixture. Artifact integrity and numerical regression are not accuracy certification.
 
-Inference runs locally. Optional auxiliary downloads contact Hugging Face. Enabling Telegram sends incident text and frame images to Telegram; it is disabled by default.
+Inference runs locally. Fire detection is enabled by default and downloads the pinned auxiliary model from Hugging Face when needed. Use `--no-threat-download` for cached weights only, or `--no-threats` to disable all auxiliary detection.
 
 ## Validation and evaluation
 
 ```powershell
 python tools/run_checks.py
 python -m ruff check core scenarios config.py main.py ui.py replay.py eval_fight.py model_smoke_test.py tests tools
-python tools/verify_models.py --inference
+python tools/verify_models.py --inference --auxiliary --device cuda
 python eval_fight.py --manifest evidence/val_manifest.csv
 ```
 
-Full model tests require Torch and approved checkpoints. Lightweight tests explicitly skip these checks. CI runs the lightweight lane on pushes/PRs; version tags and manual runs additionally require the model integrity/inference gate. Missing release artifacts fail that gate. Configure the four model URL secrets documented in [SETUP.md](SETUP.md).
+Full model tests require CUDA-enabled PyTorch, a visible GPU, and approved checkpoints. Lightweight tests check backend behavior without model libraries and explicitly skip real-model checks. CI runs those checks on pushes/PRs; version tags and manual runs additionally use a self-hosted GPU runner. Missing CUDA or release artifacts fail the model gate. Configure the runner, `GPU_PYTHON`, and four model URL secrets documented in [SETUP.md](SETUP.md).
 
 Evaluation rejects unreadable clips by default. `--allow-partial` writes coverage/failure information and still exits nonzero. Threshold selection must use validation data separate from the final accuracy test set. Real accuracy remains dependent on labeled deployment-representative clips.
 
-See [AUDIT_REMEDIATION.md](AUDIT_REMEDIATION.md) for the finding-to-fix cross-check.
+See [docs/CODEBASE_AUDIT.md](docs/CODEBASE_AUDIT.md) for this checkout's audit, cleanup, and verification results.
 
 Diagnostics retain at most 4,096 distinct IDs: `unique_ids_capped=true` explicitly signals that `unique_ids` is a capped sample rather than an exhaustive total. Model and lightweight CI lanes enforce 70% and 60% combined coverage floors.

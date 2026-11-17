@@ -34,6 +34,7 @@ from typing import Callable, List, Optional
 import numpy as np
 
 from core.logging_utils import get_logger
+from core.gpu import cuda_device_name, require_cuda
 from core.pairs import PairTrack
 from core.skeleton import NUM_JOINTS, bones_pyskl, frame_normalize, motion_sequence
 
@@ -174,7 +175,7 @@ class PairPrediction:
     probabilities: List[float]  # softmax(logits)
     fight_probability: float  # probabilities[1]; UNTRAINED_HEAD until fine-tuned
     timestamp: float = 0.0
-    device: str = "cpu"
+    device: str = "cuda"
     inference_time_ms: float = 0.0
     head_status: str = "UNTRAINED_HEAD"
 
@@ -213,7 +214,7 @@ class STGCNPPAdapter:
         modality: str = "joint",
         scorer: Optional[Callable[[np.ndarray], List[float]]] = None,
         img_hw=(1080.0, 1920.0),
-        device: str = "auto",
+        device: str = "cuda",
         freeze_backbone: bool = True,
         num_classes: int = 2,
     ):
@@ -225,12 +226,12 @@ class STGCNPPAdapter:
         self.window_seconds = float(window_seconds)
         self.modality = modality
         self.img_hw = (float(img_hw[0]), float(img_hw[1]))
-        self.device_name = device
+        self.device_name = cuda_device_name(device)
         self.freeze_backbone = bool(freeze_backbone)
         self.num_classes = int(num_classes)
         self._scorer = scorer
         self._model = None
-        self._device = "cpu"
+        self._device = self.device_name
         self.head_trained = False  # flips only after fight fine-tuning
         self.checkpoint = CheckpointInfo(path="")
 
@@ -239,28 +240,7 @@ class STGCNPPAdapter:
         return self._model is not None or self._scorer is not None
 
     def resolve_device(self, want: Optional[str] = None) -> str:
-        want = want or self.device_name
-        if want == "cuda":
-            try:
-                import torch
-
-                if not torch.cuda.is_available():
-                    raise RuntimeError(
-                        "CUDA requested but torch.cuda.is_available() is False"
-                    )
-                return "cuda"
-            except ImportError as exc:
-                raise ImportError("torch is required for device handling.") from exc
-        if want == "cpu":
-            return "cpu"
-        if want == "auto":
-            try:
-                import torch
-
-                return "cuda" if torch.cuda.is_available() else "cpu"
-            except ImportError:
-                return "cpu"
-        raise ValueError(f"device must be auto/cpu/cuda, got {want!r}")
+        return require_cuda(want or self.device_name)
 
     def load_model(
         self,
@@ -275,7 +255,7 @@ class STGCNPPAdapter:
         except ImportError as exc:
             raise ImportError(
                 "torch is required to load an ST-GCN++ checkpoint. "
-                "Install it (CPU builds suffice for smoke tests)."
+                "Install CUDA-enabled PyTorch; see SETUP.md."
             ) from exc
         import os
         from core.paths import resolve_asset
@@ -485,9 +465,10 @@ class STGCNPPAdapter:
                 chunk = torch.from_numpy(arr[i : i + 8]).to(self._device)
                 t0 = time.perf_counter()
                 logits = self._model(chunk)
-                dt = (time.perf_counter() - t0) * 1000.0 / max(len(chunk), 1)
                 probs = torch.softmax(logits, dim=1).cpu().tolist()
                 lg = logits.cpu().tolist()
+                # Reading the outputs waits for CUDA; time completed work.
+                dt = (time.perf_counter() - t0) * 1000.0 / max(len(chunk), 1)
                 for k, l, p in zip(keys[i : i + 8], lg, probs):
                     out.append(
                         PairPrediction(

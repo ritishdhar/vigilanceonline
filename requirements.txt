@@ -8,3 +8,5 @@ torchvision==0.29.1
 ultralytics==8.4.183
 lap==0.5.13
 qrcode[pil]==8.2
+imageio-ffmpeg==0.8.1
+pywebpush==2.5.0

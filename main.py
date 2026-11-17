@@ -6,6 +6,7 @@ import argparse
 import os
 
 from config import VigilanceConfig
+from core.gpu import cuda_device_name
 from core.logging_utils import get_logger, setup_logging
 from core.pipeline import Pipeline
 from core.source_utils import CaptureClock, redact_source
@@ -40,6 +41,9 @@ def build_config(args) -> VigilanceConfig:
         cfg.enable_bag = False
     if args.no_fight:
         cfg.enable_fight = False
+    if args.fight_checkpoint:
+        cfg.fight_cfg.model.checkpoint = args.fight_checkpoint
+        cfg.fight_cfg.model.autoload = False
     cfg.validate()
     return cfg
 
@@ -65,7 +69,7 @@ def parse_args(argv=None):
     p.add_argument("--lost-grace", type=float, default=None)
     p.add_argument("--fps", type=float, default=None)
     p.add_argument("--imgsz", type=int, default=None)
-    p.add_argument("--device", default=None)
+    p.add_argument("--device", type=cuda_device_name, default=None)
     p.add_argument("--evidence-dir", default=None)
     p.add_argument("--log-level", default=None)
     p.add_argument("--no-fall", action="store_true")
@@ -156,7 +160,7 @@ def main(argv=None) -> int:
     cfg = build_config(args)
     setup_logging(args.log_level or cfg.log_level)
     pipeline = Pipeline(config=cfg)
-    if args.fight_checkpoint:
+    if args.fight_checkpoint and cfg.enable_fight:
         loaded = pipeline.load_fight_model(args.fight_checkpoint)
         if loaded is None:
             log.warning("event=no_fight_model (continuing without scores)")

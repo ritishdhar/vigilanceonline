@@ -6,7 +6,6 @@ from io import BytesIO
 import json
 from pathlib import Path
 import sys
-import threading
 from types import SimpleNamespace
 
 import numpy as np
@@ -306,71 +305,6 @@ def test_gradual_separation_starts_abandonment_timer():
     assert output["alert"]
 
 
-def test_notification_event_identity_and_failed_attempt_backoff(monkeypatch):
-    from core.alert_dispatch import (
-        TelegramConfig,
-        TelegramNotifier,
-        incident_from_state,
-    )
-    from ui import LiveState
-
-    state = LiveState()
-    try:
-        state.record_event(1, "FIGHT", {})
-        first = state.active_event_id
-        state.record_event(70, "FIGHT", {})
-        assert first == state.active_event_id
-        state.record_event(71, "NO_FIGHT", {})
-        state.record_event(72, "FIGHT", {})
-        assert first != state.active_event_id
-    finally:
-        state.uploads.close()
-    notifier = TelegramNotifier(
-        TelegramConfig(enabled=True, bot_token="test", chat_id="1")
-    )
-    calls = []
-
-    def fail(*args):
-        calls.append(True)
-        raise OSError("offline")
-
-    monkeypatch.setattr(notifier, "_send", fail)
-    incident = incident_from_state("FIGHT", {}, 1, event_id=first)
-    for now in [100, 100.1, 100.2]:
-        assert not notifier.maybe_notify(incident, now=now)
-    assert len(calls) == 1
-
-
-def test_background_notification_submission_does_not_wait_for_transport(monkeypatch):
-    from core.alert_dispatch import (
-        QueuedNotifier,
-        TelegramConfig,
-        TelegramNotifier,
-        incident_from_state,
-    )
-
-    entered, release = threading.Event(), threading.Event()
-    notifier = TelegramNotifier(
-        TelegramConfig(enabled=True, bot_token="test", chat_id="1", cooldown_sec=0)
-    )
-
-    def blocking(*args):
-        entered.set()
-        release.wait(timeout=2)
-        return True
-
-    monkeypatch.setattr(notifier, "_send", blocking)
-    worker = QueuedNotifier(notifier)
-    try:
-        incident = incident_from_state("FIGHT", {}, 1, event_id="stable")
-        assert worker.maybe_notify(incident)
-        assert entered.wait(timeout=1)
-        assert not worker.maybe_notify(incident)
-    finally:
-        release.set()
-        worker.close()
-
-
 @pytest.mark.parametrize(
     "missing,allow_partial", [(False, False), (True, False), (True, True)]
 )
@@ -428,13 +362,12 @@ def test_evaluator_reports_scored_clips_and_rejects_incomplete_manifests(
 
 
 def test_missing_checkpoint_smoke_test_exits_clearly(monkeypatch):
-    pytest.importorskip("torch")
     import model_smoke_test
 
     monkeypatch.setattr(model_smoke_test, "env_report", lambda: None)
     assert (
         model_smoke_test.main(
-            ["--checkpoint", "not-a-checkpoint.pth", "--device", "cpu"]
+            ["--checkpoint", "not-a-checkpoint.pth", "--device", "cuda"]
         )
         == 2
     )

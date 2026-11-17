@@ -75,3 +75,50 @@ def test_fire_enabled_by_default_with_env_override(monkeypatch):
     assert VigilanceConfig().enable_fire is True
     monkeypatch.setenv("VIGILANCE_ENABLE_FIRE", "0")
     assert VigilanceConfig().from_env().enable_fire is False
+
+
+@pytest.mark.parametrize("entrypoint", ["main", "ui"])
+def test_explicit_checkpoint_prevents_loading_configured_model_first(
+    tmp_path, entrypoint
+):
+    import importlib
+
+    cli = importlib.import_module(entrypoint)
+    config_path = _write_config(
+        tmp_path,
+        fight_cfg={"model": {"checkpoint": "old.pth", "autoload": True}},
+    )
+    cfg = cli.build_config(
+        cli.parse_args(["--config", config_path, "--fight-checkpoint", "new.pth"])
+    )
+    assert cfg.fight_cfg.model.checkpoint == "new.pth"
+    assert cfg.fight_cfg.model.autoload is False
+
+
+def test_no_threats_disables_fire_and_opted_in_auxiliary_model():
+    from ui import build_config, parse_args
+
+    cfg = build_config(parse_args(["--threats", "--no-threats"]))
+    assert cfg.enable_fire is False
+    assert cfg.enable_threats is False
+
+
+def test_gpu_requirement_cannot_be_overridden_by_cpu():
+    from ui import build_config, parse_args
+
+    with pytest.raises(SystemExit):
+        build_config(parse_args(["--require-gpu", "--device", "cpu"]))
+
+
+def test_gpu_requirement_selects_cuda_for_both_models(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    from ui import build_config, parse_args
+
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: True)),
+    )
+    cfg = build_config(parse_args(["--require-gpu", "--device", "auto"]))
+    assert cfg.device == cfg.fight_cfg.model.device == "cuda"

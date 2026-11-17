@@ -1,4 +1,4 @@
-"""Verify approved artifacts and run real inference on the selected device."""
+"""Verify approved artifacts and optionally run real CUDA inference."""
 
 import argparse
 import json
@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from core.model_security import download_verified, file_sha256
-from core.paths import resolve_asset
+from core.gpu import cuda_device_name, require_cuda
 
 
 def main(argv=None):
@@ -21,7 +21,7 @@ def main(argv=None):
         help="fetch missing artifacts from configured HTTPS URLs",
     )
     parser.add_argument("--inference", action="store_true")
-    parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument("--device", type=cuda_device_name, default="cuda")
     parser.add_argument(
         "--auxiliary",
         action="store_true",
@@ -31,7 +31,7 @@ def main(argv=None):
     manifest = json.loads((ROOT / "models/manifest.json").read_text())
     paths = {}
     for name, item in manifest.items():
-        path = Path(resolve_asset(name))
+        path = ROOT / name
         if not path.is_file() and args.download:
             url = os.environ.get(item["url_env"], "")
             if not url.startswith("https://"):
@@ -47,6 +47,23 @@ def main(argv=None):
             raise RuntimeError(f"missing or mismatched model: {name}")
         paths[name] = str(path)
         print(f"verified {name}")
+    auxiliary = None
+    if args.auxiliary:
+        from core.threat_detection import SurveillanceThreatDetector
+
+        auxiliary = SurveillanceThreatDetector(
+            download_missing=True, device=args.device, imgsz=320
+        )
+        auxiliary_path = auxiliary._resolve_weight()
+        if (
+            not auxiliary_path
+            or file_sha256(auxiliary_path) != auxiliary.expected_sha256
+        ):
+            raise RuntimeError("missing or mismatched pinned auxiliary model")
+        # Reuse the verified file when inference is requested below.
+        auxiliary.weights[auxiliary.source_name] = auxiliary_path
+        auxiliary.download_missing = False
+        print("verified pinned auxiliary model")
     if args.inference:
         import numpy as np
         import torch
@@ -55,11 +72,7 @@ def main(argv=None):
         from hashlib import sha256
         from core.detector import Detector
 
-        torch.set_num_threads(2)
-        if args.device == "cuda" and not torch.cuda.is_available():
-            raise RuntimeError(
-                "CUDA requested but unavailable; check GPU PyTorch and driver"
-            )
+        require_cuda(args.device)
         adapter = STGCNPPAdapter(device=args.device)
         adapter.load_model(paths["models/stgcnpp/best_fight_stgcnpp_v1.pth"])
         if not adapter.head_trained:
@@ -78,12 +91,7 @@ def main(argv=None):
         )
         frame = np.zeros((240, 320, 3), dtype=np.uint8)
         detector.detect(frame, timestamp=0)
-        if args.auxiliary:
-            from core.threat_detection import SurveillanceThreatDetector
-
-            auxiliary = SurveillanceThreatDetector(
-                download_missing=True, device=args.device, imgsz=320
-            )
+        if auxiliary is not None:
             output = auxiliary.detect(frame)
             if not output.models.get("surveillance", {}).get("ready"):
                 raise RuntimeError(f"auxiliary model check failed: {output.models}")

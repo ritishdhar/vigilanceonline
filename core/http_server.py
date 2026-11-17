@@ -2,16 +2,20 @@
 
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-import base64
 import json
+import os
 from pathlib import Path
+import re
 import secrets
 import socket
+import sqlite3
 import threading
 import time
 from urllib.parse import unquote
 
 from core.paths import ROOT
+from core.incidents import INCIDENT_ID, INCIDENT_STILLS
+from core.phone_http import PhoneRoutes
 from core.source_utils import authorize_source, redact_source
 from core.video_upload import MAX_UPLOAD_BYTES, VideoUploadError
 
@@ -19,9 +23,12 @@ from core.video_upload import MAX_UPLOAD_BYTES, VideoUploadError
 class BoundedHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, *args, max_connections=16, **kwargs):
+    def __init__(self, server_address, *args, max_connections=16, **kwargs):
         self._slots = threading.BoundedSemaphore(max_connections)
-        super().__init__(*args, **kwargs)
+        self.tls_context = kwargs.pop("tls_context", None)
+        if ":" in server_address[0]:
+            self.address_family = socket.AF_INET6
+        super().__init__(server_address, *args, **kwargs)
 
     def process_request(self, request, address):
         if not self._slots.acquire(blocking=False):
@@ -38,13 +45,20 @@ class BoundedHTTPServer(ThreadingHTTPServer):
 
     def process_request_thread(self, request, address):
         try:
+            if self.tls_context is not None:
+                try:
+                    request.settimeout(5)
+                    request = self.tls_context.wrap_socket(request, server_side=True)
+                except OSError:
+                    self.close_request(request)
+                    return
             super().process_request_thread(request, address)
         finally:
             self._slots.release()
 
 
-def make_handler(state):
-    class Handler(BaseHTTPRequestHandler):
+def make_handler(state, *, recipient_only=False):
+    class Handler(PhoneRoutes, BaseHTTPRequestHandler):
         server_version = "ViglanceUI/2.0"
         timeout = 15
         header_timeout = 10
@@ -64,7 +78,14 @@ def make_handler(state):
 
         def parse_request(self):
             try:
-                return super().parse_request()
+                if not super().parse_request():
+                    return False
+                if (
+                    recipient_only
+                    and self.headers.get("Host", "").lower() != state.phone_host
+                ):
+                    return self._deny("Recipient host required")
+                return True
             finally:
                 self._header_timer.cancel()
 
@@ -97,7 +118,8 @@ def make_handler(state):
             for name, value in extra_headers:
                 self.send_header(name, value)
             self.end_headers()
-            self.wfile.write(body)
+            if self.command != "HEAD":
+                self.wfile.write(body)
 
         def _send_json(self, payload, code=200, extra_headers=()):
             self._send(
@@ -140,6 +162,7 @@ def make_handler(state):
             hosts = state.allowed_hosts or {
                 f"127.0.0.1:{port}",
                 f"localhost:{port}",
+                f"[::1]:{port}",
             }
             origins = state.allowed_origins or {f"http://{host}" for host in hosts}
             host = self.headers.get("Host", "").lower()
@@ -149,7 +172,7 @@ def make_handler(state):
             if not authenticated:
                 return True
             token = self.headers.get("X-Vigilance-Token", "")
-            if self.command == "GET" and not token:
+            if self.command in {"GET", "HEAD"} and not token:
                 jar = cookies.SimpleCookie()
                 try:
                     jar.load(self.headers.get("Cookie", ""))
@@ -201,112 +224,130 @@ def make_handler(state):
                 raise ValueError("incomplete request body")
             return body
 
-        def _recipient_api(self, method):
-            recipient_paths = {
-                ("GET", "/api/telegram/recipients"),
-                ("POST", "/api/telegram/invite"),
-                ("POST", "/api/telegram/invite/revoke"),
-                ("POST", "/api/telegram/test"),
-                ("DELETE", "/api/telegram/recipients"),
-            }
-            if (method, self.path) not in recipient_paths:
+        def _serve_evidence(self, path, content_type):
+            try:
+                handle = path.open("rb")
+            except FileNotFoundError:
+                self._send_json({"error": "Evidence unavailable"}, 404)
+                return
+            with handle:
+                size = os.fstat(handle.fileno()).st_size
+                start, end = 0, size - 1
+                header = self.headers.get("Range")
+                if header:
+                    match = re.fullmatch(r"bytes=([0-9]{0,16})-([0-9]{0,16})", header)
+                    if match and match[1]:
+                        start = int(match[1])
+                        if match[2]:
+                            end = min(end, int(match[2]))
+                    elif match and match[2]:
+                        start = max(0, size - int(match[2]))
+                    else:
+                        start = size
+                    if start > end:
+                        self._send(
+                            416,
+                            "text/plain",
+                            b"",
+                            (("Content-Range", f"bytes */{size}"),),
+                        )
+                        return
+                remaining = end - start + 1
+                self.send_response(206 if header else 200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(remaining))
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Cache-Control", "private, no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                if header:
+                    self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+                self._cors_headers()
+                self.end_headers()
+                if self.command == "HEAD":
+                    return
+                handle.seek(start)
+                try:
+                    while remaining and (chunk := handle.read(min(65536, remaining))):
+                        self.wfile.write(chunk)
+                        remaining -= len(chunk)
+                except OSError:
+                    pass
+
+        def _incident_media(self, store, incident_id, name):
+            if name in INCIDENT_STILLS:
+                self._serve_evidence(
+                    store.media(incident_id, INCIDENT_STILLS[name]), "image/jpeg"
+                )
+                return True
+            if name == "clip.mp4":
+                self._serve_evidence(store.media(incident_id, ".mp4"), "video/mp4")
+                return True
+            return False
+
+        def _incident_api(self):
+            if self.path != "/api/incidents" and not self.path.startswith(
+                "/api/incidents/"
+            ):
                 return False
             if not self._allowed():
                 return True
-            if self.path.startswith("/api/telegram/"):
-                service = state.telegram_enrollment
-                if service is None:
-                    self._send_json(
-                        {"error": "Telegram recipient setup is unavailable"}, 503
-                    )
-                    return True
-                if method == "GET" and self.path == "/api/telegram/recipients":
-                    self._send_json(
-                        {
-                            "bot_username": service.username,
-                            "bot_error": service.last_error,
-                            "recipients": [
-                                {
-                                    "chat_id": row["chat_id"],
-                                    "name": row["display_name"],
-                                    "username": row["username"],
-                                    "active": bool(row["active"]),
-                                }
-                                for row in service.recipients.recipients()
-                            ],
-                        }
-                    )
-                    return True
-                if method == "POST" and self.path == "/api/telegram/invite":
-                    if not service.username or service.last_error:
-                        self._send_json(
-                            {"error": "Telegram bot is not connected yet"}, 503
-                        )
-                        return True
-                    from io import BytesIO
-
-                    import qrcode
-
-                    token = secrets.token_urlsafe(24)
-                    expires = service.recipients.create_invite(token)
-                    url = f"https://t.me/{service.username}?start={token}"
-                    image = qrcode.make(url)
-                    output = BytesIO()
-                    image.save(output, format="PNG")
-                    self._send_json(
-                        {
-                            "url": url,
-                            "qr_data_url": "data:image/png;base64,"
-                            + base64.b64encode(output.getvalue()).decode("ascii"),
-                            "expires_at": expires,
-                        }
-                    )
-                    return True
-                if method == "POST" and self.path == "/api/telegram/invite/revoke":
-                    service.recipients.revoke_invite()
-                    self._send_json({"ok": True})
-                    return True
-                if method == "POST" and self.path == "/api/telegram/test":
-                    try:
-                        delivered = service.send_test_alert()
-                    except (OSError, TimeoutError, ValueError, RuntimeError) as exc:
-                        self._send_json(
-                            {
-                                "error": f"Telegram test send failed: {type(exc).__name__}"
-                            },
-                            502,
-                        )
-                        return True
-                    if delivered == 0:
-                        self._send_json(
-                            {"error": "No active Telegram recipients are enrolled"},
-                            409,
-                        )
-                        return True
-                    self._send_json({"ok": True, "delivered": delivered})
-                    return True
-                if method == "DELETE" and self.path == "/api/telegram/recipients":
-                    try:
-                        payload = self._read_json()
-                    except (ValueError, OSError):
-                        self._send_json({"error": "invalid JSON request"}, 400)
-                        return True
-                    chat_id = payload.get("chat_id")
-                    if not isinstance(chat_id, str) or len(chat_id) > 32:
-                        self._send_json({"error": "invalid recipient"}, 400)
-                        return True
-                    removed = service.recipients.remove(chat_id)
-                    self._send_json({"ok": removed})
-                    return True
-                self._send_json({"error": "not found"}, 404)
+            store = state.incident_store
+            if store is None:
+                self._send_json({"error": "Incident history is unavailable"}, 503)
                 return True
+            parts = self.path.split("/")
+            try:
+                if self.command == "GET" and len(parts) == 3:
+                    self._send_json({"incidents": store.list()})
+                elif len(parts) >= 4 and INCIDENT_ID.fullmatch(parts[3]):
+                    incident_id = parts[3]
+                    if (
+                        self.command in {"GET", "HEAD"}
+                        and len(parts) == 5
+                        and self._incident_media(store, incident_id, parts[4])
+                    ):
+                        return True
+                    if self.command == "GET" and len(parts) == 4:
+                        incident = store.get(incident_id)
+                        if incident and state.phone_recipients:
+                            incident["delivery"] = (
+                                state.phone_recipients.delivery_summary(incident_id)
+                            )
+                        self._send_json(
+                            incident or {"error": "Incident not found"},
+                            200 if incident else 404,
+                        )
+                    elif self.command == "POST" and parts[4:] == ["review"]:
+                        data = self._read_json()
+                        saved = store.review(
+                            incident_id,
+                            data.get("action"),
+                            "Operator",
+                            data.get("note", ""),
+                        )
+                        self._send_json(
+                            {"ok": True} if saved else {"error": "Incident not found"},
+                            200 if saved else 404,
+                        )
+                    else:
+                        self._send_json({"error": "Not found"}, 404)
+                else:
+                    self._send_json({"error": "Not found"}, 404)
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, 400)
+            except sqlite3.Error:
+                self._send_json(
+                    {"error": "Incident storage is temporarily unavailable"}, 503
+                )
             return True
 
         def do_GET(self):
+            if self.phone_request(state):
+                return
             if self.path == "/healthz":
                 self._send_json({"ok": True, "inference_mode": state.inference_mode})
                 return
-            if self._recipient_api("GET"):
+            if self._incident_api():
                 return
             public = (
                 self.path
@@ -381,40 +422,15 @@ def make_handler(state):
                             self.wfile.write(chunk)
                     except OSError:
                         pass
-            elif self.path == "/api/telegram/status":
-                bot = state.telegram_enrollment
-                active_count = 0
-                if bot and getattr(bot, "recipients", None):
-                    try:
-                        active_count = len(bot.recipients.active_chat_ids())
-                    except Exception:
-                        pass
-                self._send_json(
-                    {
-                        "configured": bot is not None,
-                        "bot_ready": bool(bot and bot.username and not bot.last_error),
-                        "bot_username": bot.username if bot else None,
-                        "bot_error": bot.last_error if bot else None,
-                        "recipient_count": active_count,
-                        "has_recipients": active_count > 0,
-                    }
-                )
             elif self.path == "/api/status":
                 with state.lock:
                     payload = dict(state.status)
                     last_frame = state.frame_updated_at
                 payload["inference_mode"] = state.inference_mode
+                if state.incident_store is not None:
+                    payload["incident_history"] = True
                 payload.setdefault("model", state.model_status)
                 payload.setdefault("source_generation", 0)
-                if state.telegram_enrollment is not None:
-                    bot = state.telegram_enrollment
-                    telegram = dict(payload.get("telegram") or {})
-                    telegram.update(
-                        bot_ready=bool(bot.username and not bot.last_error),
-                        bot_username=bot.username,
-                        bot_error=bot.last_error,
-                    )
-                    payload["telegram"] = telegram
                 if payload.get("running") and time.monotonic() - last_frame > 10:
                     payload.update(
                         running=False,
@@ -460,7 +476,9 @@ def make_handler(state):
                 self._send_json({"error": "not found"}, 404)
 
         def do_POST(self):
-            if self._recipient_api("POST"):
+            if self.phone_request(state):
+                return
+            if self._incident_api():
                 return
             if not self._allowed():
                 return
@@ -636,11 +654,17 @@ def make_handler(state):
                 )
 
         def do_DELETE(self):
-            if self._recipient_api("DELETE"):
+            if self.phone_request(state):
                 return
             self._send_json({"error": "not found"}, 404)
 
+        def do_HEAD(self):
+            if not self.phone_request(state) and not self._incident_api():
+                self._send(404, "text/plain", b"")
+
         def do_OPTIONS(self):
+            if self.phone_request(state):
+                return
             if not self._allowed(authenticated=False):
                 return
             self._send(

@@ -20,21 +20,28 @@ Hugging Face on first use unless disabled.
 from __future__ import annotations
 
 import argparse
+from ipaddress import IPv4Address, IPv4Network
+import os
 from pathlib import Path
+import sqlite3
+import ssl
 import threading
 import time
 from urllib.parse import urlsplit
+from uuid import uuid4
 from core.http_server import BoundedHTTPServer, make_handler
 
-import numpy as np
-
 from config import VigilanceConfig
+from core.gpu import cuda_device_name, require_cuda
+from core.incident_video import MAX_FRAME_BYTES, IncidentRecorder
+from core.incidents import IncidentStore, incident_source
 from core.logging_utils import get_logger, setup_logging
 from core.pipeline import Pipeline
 from core.stgcn_adapter import is_buffer_ready
 from core.video_upload import UploadStore
 from core.source_utils import CaptureClock, redact_source
 from core.paths import resolve_asset
+from core.phone_recipients import PhoneRecipients
 import secrets
 
 log = get_logger("ui")
@@ -62,15 +69,16 @@ class LiveState:
         self,
         allowed_sources=(),
         inference_mode="model",
-        telegram_enrollment=None,
         allowed_hosts=None,
         allowed_origins=None,
         secure_cookies=False,
         judge_mode=False,
         video_plays=MAX_VIDEO_PLAYS,
+        incident_store=None,
+        phone_origin=None,
+        emergency_number=None,
     ):
         self.token = secrets.token_urlsafe(32)
-        self.telegram_enrollment = telegram_enrollment
         self.allowed_hosts = allowed_hosts
         self.allowed_origins = allowed_origins
         self.secure_cookies = bool(secure_cookies)
@@ -96,6 +104,15 @@ class LiveState:
         self.notification_events = []
         self.browser_camera = None
         self.model_status = {}
+        self.incident_store = incident_store
+        self.incident_recorder = None
+        self.phone_origin = phone_origin
+        self.emergency_number = emergency_number
+        self.phone_host = urlsplit(phone_origin).netloc if phone_origin else None
+        self.phone_recipients = (
+            PhoneRecipients(incident_store) if incident_store is not None else None
+        )
+        self.phone_push = None
 
     def request_source(self, source: str) -> int:
         if self.inference_mode == "synthetic":
@@ -130,7 +147,9 @@ class LiveState:
             self.active_events.clear()
             self.notification_events = []
 
-    def record_event(self, timestamp: float, scene: str | None, alerts: dict) -> None:
+    def record_event(
+        self, timestamp: float, scene: str | None, alerts: dict, generation=None
+    ):
         observations = []
         fight_scenes = {"FIGHT", "MULTI_PERSON_FIGHT", "GROUP_ASSAULT"}
         for name, data in alerts.items():
@@ -153,13 +172,20 @@ class LiveState:
         if scene in fight_scenes and "Violence/Fight" not in alerts:
             observations.append((("fight", "scene", scene), scene, {}))
         with self.lock:
+            if generation is not None and generation != self.source_generation:
+                return []
             current = {}
             notifications = []
+            created = []
             for key, event_scene, event_alerts in observations:
                 entry = self.active_events.get(key)
                 if entry is None:
                     self.event_counter += 1
-                    event_id = f"{self.source_generation}:{self.event_counter}"
+                    event_id = (
+                        uuid4().hex
+                        if self.incident_store is not None
+                        else f"{self.source_generation}:{self.event_counter}"
+                    )
                     event = {
                         "id": event_id,
                         "start": round(float(timestamp), 3),
@@ -169,6 +195,7 @@ class LiveState:
                     }
                     entry = (event_id, event)
                     self.timeline.append(event)
+                    created.append(event)
                 entry[1]["end"] = round(float(timestamp), 3)
                 confidences = [
                     data.get("confidence")
@@ -184,6 +211,7 @@ class LiveState:
             self.notification_events = notifications
             self.active_event_id = notifications[0][0] if notifications else None
             self.active_event = next(iter(current.values()))[1] if current else None
+            return [dict(event) for event in created]
 
     def timeline_snapshot(self) -> list:
         with self.lock:
@@ -384,7 +412,6 @@ def pump_frames(
     fps_fallback: float,
     synthetic_frames=None,
     threat_detector=None,
-    notifier=None,
 ) -> None:
     from core.visualization import (
         draw_alerts,
@@ -402,14 +429,19 @@ def pump_frames(
     plays, ended = 0, current_source == "idle"
     clock = CaptureClock(False, fps)
     using_synthetic = synthetic_frames is not None
+    recorder = state.incident_recorder
     try:
         while not state.stop:
+            if recorder is not None:
+                recorder.maintain()
             with state.lock:
                 requested = state.source_request
             if requested is not None and requested[0] != current_generation:
                 old_source = current_source
                 current_generation, current_source = requested
                 using_synthetic = False
+                if recorder is not None:
+                    recorder.finish_source()
                 if cap is not None:
                     cap.release()
                 if old_source != current_source:
@@ -446,6 +478,8 @@ def pump_frames(
                             error="Webcam stopped sending frames",
                         )
                 if captured is None:
+                    if timed_out and recorder is not None:
+                        recorder.finish_source()
                     time.sleep(0.02)
                     continue
                 frame, browser_timestamp = captured
@@ -460,6 +494,7 @@ def pump_frames(
                             state.status = {
                                 "running": False,
                                 "source": redact_source(current_source),
+                                "source_generation": current_generation,
                                 "error": open_error,
                             }
                         if not (
@@ -490,12 +525,15 @@ def pump_frames(
                 if not ok:
                     cap.release()
                     cap = None
+                    if recorder is not None:
+                        recorder.finish_source()
                     if str(current_source).isdigit() or "://" in current_source:
                         timeline = state.timeline_snapshot()
                         with state.lock:
                             state.status = {
                                 "running": False,
                                 "source": redact_source(current_source),
+                                "source_generation": current_generation,
                                 "timeline": timeline,
                             }
                         time.sleep(0.1)
@@ -567,7 +605,23 @@ def pump_frames(
             with state.lock:
                 if current_generation != state.source_generation:
                     continue
-            state.record_event(ts, scene_name, alerts)
+            incidents = state.record_event(ts, scene_name, alerts, current_generation)
+            demo = getattr(state, "demo_recipient_state", None)
+            if demo is not None:
+                for event in incidents:
+                    try:
+                        demo.incident_store.detection_notice(event)
+                        demo.phone_push.wake.set()
+                    except sqlite3.Error:
+                        log.exception("event=public_notice_save_failed")
+            if state.incident_store is not None and recorder is None:
+                for event in incidents:
+                    try:
+                        state.incident_store.record(
+                            event, incident_source(current_source)
+                        )
+                    except sqlite3.Error:
+                        log.exception("event=incident_save_failed id=%s", event["id"])
             persons_by_id = {p.track_id: p for p in result.persons}
             draw_tracks(frame, result.persons, plain=True)
             draw_threats(frame, threat_detections, plain=True)
@@ -583,19 +637,30 @@ def pump_frames(
             draw_alerts(frame, alerts, plain=True)
             _draw_model_banner(frame, pipeline)
             ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            jpeg = bytes(buf) if ok else None
+            if recorder is not None:
+                evidence_jpeg = None
+                if jpeg and (incidents or recorder.wants_frame(ts)):
+                    height, width = frame.shape[:2]
+                    scale = min(720 / width, 540 / height, 1)
+                    if scale < 1 or len(jpeg) > MAX_FRAME_BYTES:
+                        size = (max(2, round(width * scale)), max(2, round(height * scale)))
+                        evidence_frame = (
+                            cv2.resize(frame, size, interpolation=cv2.INTER_AREA)
+                            if scale < 1 else frame
+                        )
+                        encoded, smaller = cv2.imencode(
+                            ".jpg", evidence_frame, [cv2.IMWRITE_JPEG_QUALITY, 70]
+                        )
+                        evidence_jpeg = bytes(smaller) if encoded else None
+                    else:
+                        evidence_jpeg = jpeg
+                recorder.ingest(
+                    ts, evidence_jpeg, incidents, incident_source(current_source)
+                )
             if not ok:
                 idx += 1
                 continue
-            if notifier is not None:
-                from core.alert_dispatch import incident_from_state
-
-                for event_id, event_scene, event_alerts in state.notification_events:
-                    notifier.maybe_notify(
-                        incident_from_state(
-                            event_scene, event_alerts, ts, event_id=event_id
-                        ),
-                        bytes(buf),
-                    )
             now = time.perf_counter()
             ema = (now - last) if ema is None else 0.9 * ema + 0.1 * (now - last)
             last = now
@@ -603,7 +668,7 @@ def pump_frames(
             with state.lock:
                 if current_generation != state.source_generation:
                     continue
-                state.jpeg = bytes(buf)
+                state.jpeg = jpeg
                 state.frame_updated_at = time.monotonic()
                 state.status = _status_from_result(
                     pipeline,
@@ -618,27 +683,14 @@ def pump_frames(
                 state.status["active_event_ids"] = [
                     item[0] for item in state.notification_events
                 ]
-                if notifier is not None:
-                    inner_notifier = getattr(notifier, "notifier", notifier)
-                    state.status["telegram"] = {
-                        "enabled": True,
-                        "ready": bool(notifier.ready),
-                        "sent": int(notifier.sent_count),
-                        "error": getattr(inner_notifier, "last_error", None),
-                        "dropped": getattr(notifier, "dropped", 0),
-                    }
-                else:
-                    state.status["telegram"] = {
-                        "enabled": False,
-                        "ready": False,
-                        "sent": 0,
-                    }
             idx += 1
             if using_synthetic:
                 time.sleep(1 / max(fps, 1))
     finally:
         if cap is not None:
             cap.release()
+        if recorder is not None:
+            recorder.finish_source()
         with state.lock:
             state.status = dict(state.status, running=False)
         log.info("event=ui_pump_end frames=%d", idx)
@@ -659,12 +711,37 @@ def parse_args(argv=None):
         help="additional source allowed for dashboard switching",
     )
     p.add_argument("--config", default=None)
-    p.add_argument("--device", choices=("auto", "cpu", "cuda"), default=None)
+    p.add_argument("--device", type=cuda_device_name, default=None)
     p.add_argument("--port", type=int, default=8000)
+    p.add_argument("--site-name", default="Campus", help="location on incident alerts")
     p.add_argument(
-        "--no-telegram",
-        action="store_true",
-        help="disable Telegram and saved credential loading",
+        "--camera-name", default="Primary camera", help="camera label on incidents"
+    )
+    p.add_argument(
+        "--recipient-origin",
+        help="HTTPS origin for the recipient app",
+    )
+    p.add_argument(
+        "--recipient-port",
+        type=int,
+        help="separate recipient-only port, on loopback unless TLS is configured",
+    )
+    p.add_argument("--recipient-cert", help="PEM certificate for LAN recipient HTTPS")
+    p.add_argument("--recipient-key", help="PEM private key for LAN recipient HTTPS")
+    p.add_argument("--public-demo-origin", help="HTTPS origin for the test-only public recipient app")
+    p.add_argument("--public-demo-directory", type=Path, help="Existing isolated demo incident directory")
+    p.add_argument(
+        "--public-recipient-evidence", action="store_true",
+        help="Allow phones joining the public app to view matching incident clips and photos without email login",
+    )
+    p.add_argument(
+        "--push-subject",
+        default=os.environ.get("VIGILANCE_PUSH_SUBJECT"),
+        help="VAPID contact URI (mailto: or HTTPS) for Web Push",
+    )
+    p.add_argument(
+        "--emergency-number",
+        help="optional local emergency number shown as a call link",
     )
     p.add_argument(
         "--frontend-origin",
@@ -739,71 +816,51 @@ def parse_args(argv=None):
         default=None,
         help="local weights for the surveillance YOLO model",
     )
-    p.add_argument(
-        "--telegram",
-        action="store_true",
-        help="enable Telegram incident alerts (needs chat id + token)",
-    )
-    p.add_argument("--telegram-chat-id", default=None)
-    p.add_argument(
-        "--telegram-bot-token",
-        default=None,
-        help="prefer VIGILANCE_TELEGRAM_BOT_TOKEN env var instead",
-    )
-    p.add_argument(
-        "--telegram-cooldown",
-        type=float,
-        default=None,
-        help="minimum seconds between Telegram messages",
-    )
-    p.add_argument(
-        "--telegram-test",
-        action="store_true",
-        help="send one test photo+message via Telegram and exit",
-    )
     p.add_argument("--log-level", default=None)
     return p.parse_args(argv)
 
 
-def main(argv=None) -> int:
-    args = parse_args(argv)
+def build_config(args) -> VigilanceConfig:
+    """Resolve startup flags before opening models, cameras, or notifications."""
     cfg = VigilanceConfig()
     if args.config:
         cfg = VigilanceConfig.from_file(args.config)
     cfg.from_env()
-    if args.require_gpu:
-        import torch
-
-        if not torch.cuda.is_available():
-            raise RuntimeError(
-                "GPU deployment requires CUDA-enabled PyTorch and a visible NVIDIA GPU"
-            )
-        cfg.device = "cuda"
-        cfg.fight_cfg.model.device = "cuda"
-    saved_telegram = {}
-    if (
-        not args.no_telegram
-        and not cfg.telegram_bot_token
-        and not args.telegram_bot_token
-    ):
-        from core.local_credentials import load_telegram_credentials
-
-        try:
-            saved_telegram = load_telegram_credentials(
-                Path(__file__).resolve().parent
-                / "evidence"
-                / "telegram_credentials.clixml"
-            )
-        except ValueError as error:
-            print(str(error))
-            return 2
-        if saved_telegram:
-            cfg.telegram_bot_token = saved_telegram["bot"]
     cfg.apply_overrides(
         source=None if args.synthetic else args.source,
         device=args.device,
+        log_level=args.log_level,
     )
-    setup_logging(args.log_level or cfg.log_level)
+    if args.no_fight:
+        cfg.enable_fight = False
+    cfg.enable_fire = cfg.enable_fire and not (
+        args.no_fire or args.no_threats or args.synthetic
+    )
+    cfg.enable_threats = (args.threats or args.enable_weapon_alerts or cfg.enable_threats) and not (
+        args.no_threats or args.synthetic
+    )
+    if args.fight_checkpoint:
+        cfg.fight_cfg.model.checkpoint = args.fight_checkpoint
+        cfg.fight_cfg.model.autoload = False
+    if args.synthetic:
+        cfg.fight_cfg.model.autoload = False
+    cfg.validate()
+    if args.require_gpu:
+        if args.synthetic:
+            raise ValueError("--require-gpu requires model mode and a CUDA device")
+        cfg.device = require_cuda(cfg.device)
+        cfg.fight_cfg.model.device = require_cuda(
+            cfg.device
+            if cfg.fight_cfg.model.device == "auto"
+            else cfg.fight_cfg.model.device
+        )
+    return cfg
+
+
+def main(argv=None) -> int:
+    args = parse_args(argv)
+    cfg = build_config(args)
+    setup_logging(cfg.log_level)
 
     public_origin = None
     allowed_hosts = None
@@ -830,75 +887,90 @@ def main(argv=None) -> int:
         print("Binding outside loopback requires --public-origin with HTTPS")
         return 2
 
-    telegram_token = args.telegram_bot_token or cfg.telegram_bot_token
-    recipient_store = None
-    telegram_enrollment = None
-    if args.no_telegram:
-        telegram_token = ""
-        cfg.telegram_enabled = False
-    if telegram_token:
-        from core.telegram_recipients import (
-            TelegramEnrollmentBot,
-            TelegramRecipientStore,
-        )
+    phone_origin = None
+    demo_directory = None
+    if args.public_demo_origin or args.public_demo_directory or args.public_recipient_evidence:
+        import re
 
-        recipient_store = TelegramRecipientStore(cfg.telegram_recipients_db)
-        telegram_enrollment = TelegramEnrollmentBot(telegram_token, recipient_store)
-        telegram_enrollment.start()
-
-    if args.telegram_test:
-        from core.alert_dispatch import Incident, TelegramConfig, TelegramNotifier
-
-        token = args.telegram_bot_token or cfg.telegram_bot_token
-        tcfg = TelegramConfig(
-            enabled=True,
-            bot_token=token,
-            chat_id=args.telegram_chat_id or cfg.telegram_chat_id,
-            cooldown_sec=0.0,
-        )
-        notifier = TelegramNotifier(tcfg, recipient_store=recipient_store)
-        if not notifier.ready:
-            print(
-                "telegram-test ABORT: need --telegram-chat-id and "
-                "VIGILANCE_TELEGRAM_BOT_TOKEN"
-            )
+        demo_directory = args.public_demo_directory.resolve() if args.public_demo_directory else None
+        if (
+            not re.fullmatch(r"https://[a-z0-9-]+\.trycloudflare\.com", args.public_demo_origin or "")
+            or args.synthetic or 8789 in {args.port, args.recipient_port}
+            or demo_directory is None
+            or demo_directory.parent != Path("tmp").resolve()
+            or not demo_directory.name.startswith("public-demo-")
+            or not (demo_directory / "incidents.sqlite3").is_file()
+        ):
+            print("Public demo requires its isolated tmp/public-demo directory, a Cloudflare origin, and port 8789.")
             return 2
-        frame = np.zeros((240, 320, 3), dtype=np.uint8)
-        cv2.putText(
-            frame,
-            "VIGLANCE telegram test",
-            (20, 120),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 255, 0),
-            2,
-        )
-        ok, buf = cv2.imencode(".jpg", frame)
-        incident = Incident(
-            key="telegram-test",
-            title="TEST: fight detected",
-            scene="FIGHT",
-            alerts=["Violence/Fight"],
-            timestamp=0.0,
-        )
-        sent = notifier.maybe_notify(incident, bytes(buf) if ok else None, now=0.0)
+        with sqlite3.connect(demo_directory / "incidents.sqlite3") as db:
+            if db.execute(
+                """SELECT 1 FROM incidents WHERE test=0 AND
+                   (source!='Detection notification' OR clip!='unavailable') LIMIT 1"""
+            ).fetchone() or any((demo_directory / "incident-media").glob("*")):
+                print("The public phone database must contain only test alerts and basic notices.")
+                return 2
+    if args.emergency_number and not (
+        args.emergency_number.isascii()
+        and args.emergency_number.isdecimal()
+        and 2 <= len(args.emergency_number) <= 8
+    ):
+        print("--emergency-number must be a local number of 2 to 8 digits")
+        return 2
+    if args.recipient_origin:
+        parsed = urlsplit(args.recipient_origin)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+        ):
+            print("--recipient-origin must be an HTTPS origin without a path")
+            return 2
+        phone_origin = "https://" + parsed.netloc.lower()
+        if phone_origin == public_origin or phone_origin in args.frontend_origin:
+            print("--recipient-origin must use a distinct host from dashboard origins")
+            return 2
+        if phone_origin == args.public_demo_origin:
+            print("Live recipients and the public demo require different HTTPS origins.")
+            return 2
+    if args.recipient_port is not None and (
+        not phone_origin
+        or args.synthetic
+        or args.recipient_port == args.port
+        or not 1 <= args.recipient_port <= 65535
+    ):
         print(
-            "telegram-test "
-            + ("SENT - check your chat" if sent else "FAILED - see log")
+            "--recipient-port requires an HTTPS recipient origin and a separate port in model mode"
         )
-        return 0 if sent else 1
+        return 2
+    phone_host = "127.0.0.1"
+    phone_tls = None
+    if args.recipient_cert or args.recipient_key:
+        if not (args.recipient_cert and args.recipient_key and args.recipient_port):
+            print("Direct recipient HTTPS requires --recipient-port, --recipient-cert and --recipient-key")
+            return 2
+        origin = urlsplit(phone_origin)
+        try:
+            address = IPv4Address(origin.hostname)
+            if origin.port != args.recipient_port or not any(
+                address in IPv4Network(network)
+                for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+            ):
+                raise ValueError("Use a private LAN IPv4 address and the recipient port in --recipient-origin.")
+            phone_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            phone_tls.minimum_version = ssl.TLSVersion.TLSv1_2
+            phone_tls.load_cert_chain(args.recipient_cert, args.recipient_key)
+            phone_host = str(address)
+        except (ValueError, OSError) as exc:
+            print(f"Could not configure recipient HTTPS: {exc}")
+            return 2
 
     from core.demo import ScriptedDetector, black_frames
 
-    fire_on = cfg.enable_fire and not args.no_fire and not args.synthetic
-    threats_on = (
-        (args.threats or cfg.enable_threats)
-        and not args.no_threats
-        and not args.synthetic
-    )
-    use_threat_detector = threats_on or fire_on
-    cfg.enable_fire = fire_on
-    cfg.enable_threats = threats_on
+    use_threat_detector = cfg.enable_threats or cfg.enable_fire
     if args.synthetic:
         script = [
             [(1, 60.0), (2, 220.0)],
@@ -932,16 +1004,14 @@ def main(argv=None) -> int:
             return 2
         frames, source_label = None, cfg.source
 
-    if args.no_fight:
-        cfg.enable_fight = False
-    cfg.validate()
     pipeline = Pipeline(config=cfg, detector=detector)
-    if args.fight_checkpoint and cfg.enable_fight:
+    if args.fight_checkpoint and cfg.enable_fight and not args.synthetic:
         loaded = pipeline.load_fight_model(args.fight_checkpoint)
         if loaded is None:
             log.warning("event=ui_no_fight_model (continuing without scores)")
     elif (
         cfg.enable_fight
+        and not args.synthetic
         and Path(resolve_asset(cfg.fight_cfg.model.checkpoint)).exists()
         and not pipeline.pair_adapter.is_ready
     ):
@@ -961,7 +1031,7 @@ def main(argv=None) -> int:
             device=cfg.device,
             bag_proximity_px=cfg.bag_proximity_px,
             enable_weapon_alerts=args.enable_weapon_alerts,
-            enable_fire_alerts=fire_on,
+            enable_fire_alerts=cfg.enable_fire,
             enable_bag_alerts=False,
         )
     # All entrypoints now use core-owned auxiliary detections and health.
@@ -987,50 +1057,33 @@ def main(argv=None) -> int:
     state = LiveState(
         allowed_sources=[cfg.source, *args.allow_source],
         inference_mode="synthetic" if args.synthetic else "model",
-        telegram_enrollment=telegram_enrollment,
         allowed_hosts=allowed_hosts,
         allowed_origins=allowed_origins,
         secure_cookies=secure_cookies,
         judge_mode=args.judge_mode,
         video_plays=args.video_plays,
+        incident_store=None
+        if args.synthetic
+        else IncidentStore(
+            cfg.evidence_dir, site=args.site_name, camera=args.camera_name
+        ),
+        phone_origin=phone_origin,
+        emergency_number=args.emergency_number,
     )
-    notifier = None
-    state.model_status = _model_status(pipeline)
-    if not args.no_telegram and (
-        args.telegram or cfg.telegram_enabled or recipient_store is not None
-    ):
-        from core.alert_dispatch import TelegramConfig, TelegramNotifier
+    if state.incident_store is not None:
+        try:
+            from imageio_ffmpeg import get_ffmpeg_exe
 
-        token = telegram_token
-        tcfg = TelegramConfig(
-            enabled=True,
-            bot_token=token,
-            chat_id=args.telegram_chat_id or cfg.telegram_chat_id,
-            cooldown_sec=(
-                args.telegram_cooldown
-                if args.telegram_cooldown is not None
-                else cfg.telegram_cooldown_sec
-            ),
-            notify_fight=cfg.telegram_notify_fight,
-            notify_fall=cfg.telegram_notify_fall,
-            notify_fire=cfg.telegram_notify_fire,
-            notify_bag=cfg.telegram_notify_bag,
-            notify_weapon=cfg.telegram_notify_weapon,
-        )
-        notifier = TelegramNotifier(tcfg, recipient_store=recipient_store)
-        if notifier.ready:
-            log.info("event=telegram_ready cooldown=%.0fs", tcfg.cooldown_sec)
-        elif recipient_store is not None:
-            log.info("event=telegram_waiting_for_recipients")
-        else:
-            log.warning(
-                "event=telegram_not_configured "
-                "(need --telegram-chat-id and VIGILANCE_TELEGRAM_BOT_TOKEN)"
+            state.incident_recorder = IncidentRecorder(
+                state.incident_store, get_ffmpeg_exe()
             )
-    if notifier is not None:
-        from core.alert_dispatch import QueuedNotifier
+        except (ImportError, RuntimeError):
+            log.warning("event=incident_encoder_unavailable install=imageio-ffmpeg")
+        if args.push_subject:
+            from core.phone_push import PhonePush
 
-        notifier = QueuedNotifier(notifier)
+            state.phone_push = PhonePush(state.phone_recipients, args.push_subject)
+    state.model_status = _model_status(pipeline)
     pump = threading.Thread(
         target=pump_frames,
         args=(
@@ -1040,13 +1093,48 @@ def main(argv=None) -> int:
             cfg.fps,
             frames,
             None,
-            notifier,
         ),
         daemon=True,
     )
-    pump.start()
     server = BoundedHTTPServer((args.host, args.port), make_handler(state))
-    display_origin = public_origin or f"http://127.0.0.1:{args.port}"
+    demo_server = None
+    if demo_directory is not None:
+        from core.phone_push import PhonePush
+
+        demo = LiveState(
+            inference_mode="synthetic",
+            incident_store=IncidentStore(demo_directory, site="RakshaNetra demo", camera="Test alerts"),
+            phone_origin=args.public_demo_origin,
+        )
+        demo.public_demo = True
+        demo.evidence_state = state
+        demo.public_recipient_evidence = args.public_recipient_evidence
+        demo.phone_push = PhonePush(demo.phone_recipients, args.public_demo_origin)
+        state.demo_recipient_state = demo
+        demo_server = BoundedHTTPServer(("127.0.0.1", 8789), make_handler(demo, recipient_only=True))
+        threading.Thread(
+            target=demo_server.serve_forever, daemon=True, name="demo-recipient-http"
+        ).start()
+        demo.phone_push.start()
+    phone_server = None
+    if args.recipient_port is not None:
+        try:
+            phone_server = BoundedHTTPServer(
+                (phone_host, args.recipient_port),
+                make_handler(state, recipient_only=True),
+                tls_context=phone_tls,
+            )
+        except OSError:
+            server.server_close()
+            raise
+        threading.Thread(
+            target=phone_server.serve_forever, daemon=True, name="recipient-http"
+        ).start()
+    if state.phone_push is not None:
+        state.phone_push.start()
+    pump.start()
+    display_host = f"[{args.host}]" if ":" in args.host else args.host
+    display_origin = public_origin or f"http://{display_host}:{args.port}"
     log.info(
         "event=ui_ready url=%s source=%s",
         display_origin,
@@ -1059,13 +1147,21 @@ def main(argv=None) -> int:
         pass
     finally:
         state.stop = True
+        if demo_server is not None:
+            demo_server.shutdown()
+            demo_server.server_close()
+            state.demo_recipient_state.phone_push.close()
+            state.demo_recipient_state.uploads.close()
+        if phone_server is not None:
+            phone_server.shutdown()
+            phone_server.server_close()
         server.shutdown()
         server.server_close()
         pump.join(timeout=5)
-        if notifier is not None:
-            notifier.close()
-        if telegram_enrollment is not None:
-            telegram_enrollment.close()
+        if state.incident_recorder is not None and not pump.is_alive():
+            state.incident_recorder.close()
+        if state.phone_push is not None:
+            state.phone_push.close()
         state.uploads.close()
     return 0
 

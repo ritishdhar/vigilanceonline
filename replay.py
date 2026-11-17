@@ -5,7 +5,8 @@ prints per-frame inspection: tracked people, candidate pairs, pair buffers,
 graph structure, scene candidate. --synthetic runs a scripted crowd without
 any video file or ML weights. --demo-scores injects pair scores (as
 "a-b:score") so graph reasoning can be inspected before a classifier exists.
-No automatic web downloading. cv2 required only for real video / --viz.
+Real-video mode may download the pinned auxiliary model for fire detection.
+cv2 is required only for real video / --viz.
 """
 
 from __future__ import annotations
@@ -110,6 +111,8 @@ def main(argv=None) -> int:
     scorer = demo_scorer if table else None
 
     if args.synthetic:
+        cfg.fight_cfg.model.autoload = False
+        cfg.enable_fire = cfg.enable_threats = False
         script = [
             [(1, 40.0), (2, 160.0)],
             [(1, 42.0), (2, 158.0), (3, 270.0)],

@@ -2,6 +2,7 @@
 
 from http.client import HTTPConnection
 import json
+import socket
 import threading
 
 import pytest
@@ -60,6 +61,35 @@ def test_foreign_origin_and_rebinding_host_are_rejected(server):
         )[0]
         == 403
     )
+
+
+@pytest.mark.skipif(not socket.has_ipv6, reason="IPv6 not available")
+def test_ipv6_loopback_supports_authenticated_requests():
+    state = LiveState()
+    server = BoundedHTTPServer(("::1", 0), make_handler(state))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = HTTPConnection("::1", server.server_address[1], timeout=3)
+    try:
+        assert server.address_family == socket.AF_INET6
+        connection.request(
+            "GET",
+            "/api/status",
+            headers={
+                "X-Vigilance-Token": state.token,
+                "Origin": f"http://[::1]:{server.server_address[1]}",
+            },
+        )
+        response = connection.getresponse()
+        assert response.status == 200
+        response.read()
+    finally:
+        connection.close()
+        state.stop = True
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+        state.uploads.close()
 
 
 def test_cookie_alone_cannot_authorize_mutation(server):
@@ -156,78 +186,3 @@ def test_stalled_capture_is_not_reported_healthy(server):
     status = json.loads(body)
     assert code == 200 and not status["running"]
     assert status["fight_status"] == "ERROR"
-
-
-def test_telegram_recipient_management_uses_dashboard_session(server, tmp_path):
-    from core.telegram_recipients import TelegramEnrollmentBot, TelegramRecipientStore
-
-    _, state = server
-    store = TelegramRecipientStore(tmp_path / "recipients.sqlite3")
-    bot = TelegramEnrollmentBot("not-a-real-token", store)
-    bot.username = "rakshanetra_test_bot"
-    state.telegram_enrollment = bot
-
-    assert request(server, "/api/telegram/recipients", token=False)[0] == 403
-
-    code, body, _ = request(server, "/api/telegram/recipients")
-    assert code == 200
-    assert json.loads(body)["recipients"] == []
-
-    code, body, _ = request(
-        server,
-        "/api/telegram/invite",
-        "POST",
-        b"{}",
-        {"Content-Type": "application/json"},
-    )
-    invite = json.loads(body)
-    assert code == 200
-    assert invite["url"].startswith("https://t.me/rakshanetra_test_bot?start=")
-    assert invite["qr_data_url"].startswith("data:image/png;base64,")
-
-    assert (
-        request(
-            server,
-            "/api/telegram/invite",
-            "POST",
-            b"{}",
-            {"Content-Type": "application/json"},
-            token=False,
-        )[0]
-        == 403
-    )
-    assert (
-        request(
-            server,
-            "/api/admin/login",
-            "POST",
-            json.dumps({"password": "not-supported"}).encode(),
-            {"Content-Type": "application/json"},
-        )[0]
-        == 404
-    )
-
-
-def test_enrollment_status_explains_missing_setup_without_exposing_credentials(server):
-    code, body, _ = request(server, "/api/telegram/status")
-    assert code == 200
-    data = json.loads(body)
-    assert data["configured"] is False
-    assert request(server, "/api/telegram/status", token=False)[0] == 403
-
-
-def test_enrollment_status_never_exposes_backend_bot_token(server, tmp_path):
-    from core.telegram_recipients import TelegramEnrollmentBot, TelegramRecipientStore
-
-    _, state = server
-    bot = TelegramEnrollmentBot(
-        "private-bot-token", TelegramRecipientStore(tmp_path / "recipients.sqlite3")
-    )
-    bot.username = "rakshanetra_test_bot"
-    state.telegram_enrollment = bot
-    code, body, _ = request(server, "/api/telegram/status")
-    assert code == 200
-    assert json.loads(body)["configured"] is True
-    assert json.loads(body)["bot_ready"] is True
-    assert b"private-bot-token" not in body
-    assert "recipients" not in json.loads(body)

@@ -1,23 +1,20 @@
-"""ST-GCN++ real-model tests. torch-gated, checkpoint-gated.
+"""ST-GCN++ CUDA model tests; pure preprocessing checks need no hardware.
 
-Offline/unit tests run everywhere (numpy-only paths, error paths).
-Checkpoint-dependent tests run only when models/stgcnpp/j.pth exists;
-otherwise they report SKIPPED — checkpoint unavailable (never fake-passed).
-CUDA tests skip when torch.cuda is unavailable.
+Real model checks skip unless CUDA and the required checkpoints are present.
+The release GPU gate separately fails when CUDA or artifacts are missing.
 """
 
 import numpy as np
 import pytest
 
 try:
-    import torch  # noqa: F401
-
-    needs_torch = pytest.mark.skipif(False, reason="")
-    _has_torch = True
+    import torch
 except ImportError:
-    needs_torch = pytest.mark.skipif(True, reason="SKIPPED - torch unavailable")
-    _has_torch = False
-    torch = None  # type: ignore
+    torch = None
+
+needs_cuda = pytest.mark.skipif(
+    torch is None or not torch.cuda.is_available(), reason="CUDA PyTorch unavailable"
+)
 
 from core.stgcn_adapter import ModelNotLoadedError, STGCNPPAdapter, normalize_state_dict
 
@@ -35,9 +32,6 @@ trained_available = pytest.mark.skipif(
     reason="SKIPPED - trained checkpoint unavailable "
     "(models/stgcnpp/best_fight_stgcnpp_v1.pth not present)",
 )
-cuda_available = pytest.mark.skipif(
-    not (_has_torch and torch.cuda.is_available()), reason="SKIPPED - CUDA unavailable"
-)
 
 
 def _load_adapter(**kw):
@@ -46,11 +40,11 @@ def _load_adapter(**kw):
 
 
 # 1. model construction -------------------------------------------------------
-@needs_torch
+@needs_cuda
 def test_model_construction_channels_stages():
     from core.stgcn_model import build_model
 
-    m = build_model()
+    m = build_model().to("cuda")
     assert len(m.backbone.gcn) == 10
     assert m.backbone.out_channels == 256
     assert m.fight_head.out_features == 2
@@ -59,14 +53,14 @@ def test_model_construction_channels_stages():
 
 
 # 2. PYSKL graph topology ------------------------------------------------------
-@needs_torch
+@needs_cuda
 def test_graph_topology_matches_pyskl():
     from core.stgcn_model import build_model, coco_spatial_adjacency
 
     A = coco_spatial_adjacency()
     assert A.shape == (3, 17, 17)
     assert np.allclose(A[0], np.eye(17))
-    m = build_model()
+    m = build_model().to("cuda")
     assert tuple(m.backbone.gcn[0].gcn.A.shape) == (3, 17, 17)
     init = m.backbone.gcn[0].gcn.A.detach().cpu().numpy()
     assert np.allclose(init, A)
@@ -109,7 +103,7 @@ def test_state_dict_normalization():
 
 # 7/8/9. backbone loading, missing/unexpected keys -------------------------------
 @ckpt_available
-@needs_torch
+@needs_cuda
 def test_backbone_checkpoint_loading():
     import torch as _t
     from core.stgcn_model import build_model
@@ -120,13 +114,13 @@ def test_backbone_checkpoint_loading():
     head = sorted(k for k in sd if k.startswith("cls_head."))
     assert head == ["cls_head.fc_cls.bias", "cls_head.fc_cls.weight"]
     assert obj["cls_head.fc_cls.weight"].shape == (60, 256)  # ignored, not loaded
-    m = build_model()
+    m = build_model().to("cuda")
     res = m.backbone.load_state_dict(bd, strict=True)
     assert res.missing_keys == [] and res.unexpected_keys == []
 
 
 @ckpt_available
-@needs_torch
+@needs_cuda
 def test_adapter_load_reports_keys():
     info, ad = _load_adapter()
     assert info.loaded and info.missing_keys == [] and info.unexpected_keys == []
@@ -134,7 +128,7 @@ def test_adapter_load_reports_keys():
     assert ad.is_ready and not ad.head_trained
 
 
-@needs_torch
+@needs_cuda
 def test_incompatible_checkpoint_rejected(tmp_path):
     ad = STGCNPPAdapter()
     bad = tmp_path / "bad.pth"
@@ -149,11 +143,11 @@ def test_incompatible_checkpoint_rejected(tmp_path):
         ad.load_model("models/stgcnpp/does-not-exist.pth")
 
 
-# 10/12/19. CPU forward + batch + 2-class shape ----------------------------------
+# 10/12/19. CUDA forward + batch + 2-class shape ----------------------------------
 @ckpt_available
-@needs_torch
-def test_cpu_forward_single():
-    _, ad = _load_adapter(device="cpu")
+@needs_cuda
+def test_cuda_forward_single():
+    _, ad = _load_adapter(device="cuda")
     x = np.random.rand(1, 2, 100, 17, 3).astype(np.float32)
     preds = ad.predict_detailed([(1, 0, 2, 0)], x)
     assert len(preds) == 1
@@ -161,12 +155,12 @@ def test_cpu_forward_single():
     assert len(p.logits) == 2 and len(p.probabilities) == 2
     assert abs(sum(p.probabilities) - 1.0) < 1e-5
     assert p.head_status == "UNTRAINED_HEAD"
-    assert p.device == "cpu"
+    assert p.device == "cuda"
 
 
 @ckpt_available
 @pytest.mark.parametrize("n", [1, 2, 4, 8])
-@needs_torch
+@needs_cuda
 def test_batch_inference_shapes(n):
     _, ad = _load_adapter()
     x = np.random.rand(n, 2, 100, 17, 3).astype(np.float32)
@@ -174,21 +168,9 @@ def test_batch_inference_shapes(n):
     assert len(scores) == n and all(isinstance(s, float) for s in scores)
 
 
-# 11. CUDA forward -----------------------------------------------------------------
-@ckpt_available
-@cuda_available
-@needs_torch
-def test_cuda_forward():
-    _, ad = _load_adapter()
-    ad.load_model(CKPT, device="cuda")
-    x = np.random.rand(1, 2, 100, 17, 3).astype(np.float32)
-    preds = ad.predict_detailed([(1, 0, 2, 0)], x)
-    assert preds[0].device == "cuda"
-
-
 # 13. pair-key mapping -----------------------------------------------------------------
 @ckpt_available
-@needs_torch
+@needs_cuda
 def test_batch_index_to_pair_key_mapping():
     _, ad = _load_adapter()
     keys = [(1, 0, 2, 0), (1, 0, 3, 0), (2, 0, 3, 0), (4, 0, 5, 0)]
@@ -207,7 +189,7 @@ def test_model_not_loaded_error():
 
 # 15. insufficient history (adapter-level gate) --------------------------------------------
 @ckpt_available
-@needs_torch
+@needs_cuda
 def test_insufficient_history_no_inference_pipeline():
     from tests.conftest import FakeDetector, black_frames
     from config import VigilanceConfig
@@ -223,7 +205,7 @@ def test_insufficient_history_no_inference_pipeline():
 
 # 16. real graph score propagation ------------------------------------------------------------
 @trained_available
-@needs_torch
+@needs_cuda
 def test_real_graph_score_propagation():
     from tests.conftest import FakeDetector, black_frames
     from config import VigilanceConfig
@@ -243,7 +225,7 @@ def test_real_graph_score_propagation():
 
 
 @ckpt_available
-@needs_torch
+@needs_cuda
 def test_untrained_checkpoint_does_not_reach_graph():
     from tests.conftest import FakeDetector, black_frames
     from config import VigilanceConfig
@@ -265,7 +247,7 @@ def test_untrained_checkpoint_does_not_reach_graph():
 
 # 18. frozen backbone ---------------------------------------------------------------------------
 @ckpt_available
-@needs_torch
+@needs_cuda
 def test_frozen_backbone_default():
     _, ad = _load_adapter()
     frozen = [p.requires_grad for p in ad._model.backbone.parameters()]
@@ -303,7 +285,7 @@ def test_deterministic_preprocessing():
 
 # 21. trained fight checkpoint ------------------------------------------------------
 @trained_available
-@needs_torch
+@needs_cuda
 def test_trained_fight_checkpoint_loads():
     ad = STGCNPPAdapter(temporal_length=100, window_seconds=4.0)
     info = ad.load_model(TRAINED_CKPT)

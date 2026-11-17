@@ -61,6 +61,7 @@ const RakshaUI = (() => {
     return /violence.*fight|^fight$|^multi_person_fight$|^group_assault$/i.test(name)
       ? "fight" : (/^(Abandoned Bag|Unattended Bag Candidate)$/.test(name) ? "bag" : name);
   }
+  function savedKey(id, kind) { return "incident:" + id + ":" + kind; }
   function titleFor(kind, scene) {
     return kind === "fight" ? FIGHT_TITLES[scene] || FIGHT_TITLES.FIGHT
       : kind === "bag" ? "Unattended bag" : words[kind] || String(kind).replace(/_/g, " ");
@@ -144,7 +145,8 @@ const RakshaUI = (() => {
       const timeline = Array.isArray(s.timeline) ? s.timeline : [];
       const created = [], evicted = [], capturing = isCapturing(s) && fresh;
       function upsert(kind, start, end, scene, backendId) {
-        const id = epoch + ":" + (backendId ?? start) + ":" + kind;
+        const persistent = /^[0-9a-f]{32}$/.test(backendId || "");
+        const id = persistent ? savedKey(backendId, kind) : epoch + ":" + (backendId ?? start) + ":" + kind;
         let entry = alertStore.get(id);
         if (!entry) {
           entry = {
@@ -152,6 +154,7 @@ const RakshaUI = (() => {
             start, end, source: displaySource, camera, epoch,
             score: null, reason: "Recorded activity. Review the available context.",
             review: "unreviewed", active: false, uncertain: false,
+            savedId: persistent ? backendId : null,
             firstSeen: now, lastSeen: null, snapshot: null, synthetic: s.inference_mode === "synthetic"
           };
           alertStore.set(id, entry); created.push(entry);
@@ -219,7 +222,7 @@ const RakshaUI = (() => {
     return '"' + (/^[=+\-@\t\r]/.test(text) ? "'" : "") + text.replace(/"/g, '""') + '"';
   }
   return {escapeHTML, score, topPairScore, sourceLabel, sourceMode, sourceTime,
-    isCapturing, currentDetections, health, createSession, csvCell, MAX_STORED_ALERTS};
+    isCapturing, currentDetections, health, createSession, csvCell, category, savedKey, MAX_STORED_ALERTS};
 })();
 if (typeof module !== "undefined" && module.exports) module.exports = RakshaUI;
 
@@ -250,10 +253,10 @@ if (typeof document !== "undefined") (() => {
   const views = {
     overview: ["Overview", "Session overview", "Detection and incident totals for this session."],
     monitoring: ["Live monitoring", "Live monitoring", "Connect a camera. Detect activity. Review incidents."],
-    incidents: ["Incident history", "Incident history", "Review detections from this browser session."],
+    incidents: ["Incident history", "Incident history", "Search and review recorded detections."],
     analytics: ["Analytics", "Analytics", "Observed activity and model scores."],
     health: ["Camera health", "Camera health", "Capture, models, and connection status."],
-    recipients: ["Alert recipients", "Alert recipients", "Connect opted-in Telegram recipients to incident alerts."],
+    recipients: ["Alert recipients", "Alert recipients", "Link devices and check notification delivery."],
     settings: ["Preferences", "Preferences", "Saved on this device."]
   };
   const recipientView = document.createElement("section");
@@ -262,27 +265,36 @@ if (typeof document !== "undefined") (() => {
   recipientView.hidden = true;
   recipientView.setAttribute("aria-labelledby", "recipientsHeading");
   recipientView.innerHTML = `
-    <article class="panel recipient-panel">
-      <div class="panel-heading"><div><h2 id="recipientsHeading">Telegram alert recipients</h2>
-      <p class="muted small">People scan your QR, open your bot and tap Start to opt in.</p></div></div>
-      <details class="recipient-help"><summary>How enrollment works</summary><p>Anyone who scans an active QR can receive text incident alerts. QR invites expire after one hour. Recipients can send /stop to unsubscribe. No camera images are sent to enrolled recipients. Phone sounds are controlled by Telegram and device settings. Anyone with access to this dashboard can manage recipients.</p></details>
-      <div class="recipient-setup" id="recipientSetup" hidden><strong>Connect your Telegram bot</strong><p>In Telegram, create a bot with <a href="https://t.me/BotFather" target="_blank" rel="noopener noreferrer">@BotFather</a> using <code class="inline-command">/newbot</code>. Stop your running dashboard, then run this in your project’s PowerShell terminal:</p><code>.\\tools\\start_telegram.ps1</code><p>Enter the BotFather token in the hidden local prompt. The launcher saves it encrypted for your Windows account and configures the backend; no token is needed in this dashboard. You do not need to publish the dashboard for phone opt-in.</p></div>
-      <div id="recipientAdmin" hidden>
-        <div class="recipient-actions">
-          <button class="button primary" id="createRecipientInvite" type="button">Create opt-in QR</button>
-          <button class="button secondary" id="sendRecipientTest" type="button">Send test alert</button>
-        </div>
-        <div id="recipientInvite" class="recipient-invite" hidden>
-          <img id="recipientQr" alt="QR code to open the Telegram alert bot">
-          <div><strong>Scan to opt in</strong><p class="small muted" id="recipientInviteExpiry">The recipient must tap Start in Telegram. This invite expires in one hour.</p>
-          <a id="recipientLink" target="_blank" rel="noopener noreferrer">Open Telegram invite</a>
-          <button class="text-button" id="revokeRecipientInvite" type="button">Revoke invite</button></div>
-        </div>
-        <div class="recipient-list-heading"><div><h3>Enrolled recipients <span id="recipientTotal" class="recipient-total">0</span></h3><p>People connected to your incident alerts.</p></div><span class="recipient-channel">Telegram · Text alerts</span></div>
-        <div id="recipientRows" class="recipient-rows" aria-label="Enrolled recipients"></div>
-        <p id="recipientBotStatus" class="recipient-connection" role="status">Checking bot connection…</p>
+    <article id="phonePanel" class="panel recipient-panel" hidden>
+      <p id="phoneWorkspace" class="small muted" hidden></p>
+      <label id="phoneWorkspacePicker" hidden>Recipient workspace
+        <select id="phoneWorkspaceSelect"><option value="demo">Public phone app</option><option value="live" selected>Protected live alerts</option></select>
+      </label>
+      <div class="recipient-actions">
+        <button id="phoneInviteButton" class="button primary" type="button" disabled>Generate QR</button>
+        <button id="phoneTestButton" class="button secondary" type="button" disabled>Send test alert</button>
+        <p id="phonePushState" class="small muted" hidden></p>
       </div>
-      <p id="recipientMessage" class="form-message" role="status"></p>
+      <div id="phoneInvite" class="recipient-invite phone-invite" hidden>
+        <img id="phoneInviteQR" alt="One-time phone enrollment QR">
+        <div class="phone-invite-copy">
+          <div class="phone-invite-state"><span class="phone-wait-spinner" aria-hidden="true"></span><strong id="phoneInviteStatus" role="status">Waiting for phone</strong></div>
+          <p class="muted small" id="phoneInviteHelp">Scan with your phone camera to link RakshaNetra.</p>
+          <p id="phoneInviteAddress" class="phone-invite-address muted small"></p>
+          <p id="phoneInviteExpiry" class="muted small"></p>
+          <details id="phoneInviteManual">
+            <summary>Use an invite code</summary>
+            <label for="phoneInviteCode">Manual invite code</label>
+            <input id="phoneInviteCode" readonly autocomplete="off" spellcheck="false">
+            <a id="phoneInviteLink" target="_blank" rel="noopener noreferrer">Open invitation</a>
+          </details>
+          <button id="phoneInviteCancel" class="button secondary small-button" type="button">Cancel QR</button>
+        </div>
+      </div>
+      <div id="phoneLinked" class="phone-linked" role="status" hidden><span class="phone-linked-icon" aria-hidden="true">✓</span><div><strong id="phoneLinkedName"></strong><p>Finish setup by enabling notifications in the installed app.</p></div></div>
+      <div class="recipient-list-heading"><h2 id="recipientsHeading">Linked devices <span id="phoneDeviceCount" class="recipient-total">0</span></h2></div>
+      <div id="phoneDeviceRows" class="recipient-rows"></div>
+      <p id="phoneMessage" class="form-message" role="status"></p>
     </article>`;
   document.querySelector(".primary-column").append(recipientView);
   let preferences = {...defaults};
@@ -372,7 +384,7 @@ if (typeof document !== "undefined") (() => {
     $("connectButton").hidden = next === "settings" || next === "recipients";
     document.title = "RakshaNetra · " + label;
     closeNavigation(); render();
-    if (next === "recipients") loadEnrollmentStatus();
+    if (next === "recipients") loadPhoneDevices();
     if (changed) {
       if (hadView) $("main-content").focus({preventScroll: true});
       window.scrollTo({top: 0, behavior: "instant"});
@@ -474,209 +486,227 @@ if (typeof document !== "undefined") (() => {
     try { return await fetch(endpoint(url), {...options, headers, credentials: "include", signal: controller.signal, cache: "no-store"}); }
     finally { clearTimeout(timer); }
   }
-  let recipientAdminUnlocked = false, recipientRequestPending = false, recipientRefreshAt = 0;
-  let recipientStatusPending = false, recipientStatusAt = 0, recipientBotReady = false;
-  let recipientInviteExpiresAt = 0, recipientActiveCount = 0;
-  const botErrorLabels = {
-    BOT_TOKEN_REJECTED: "The bot token was rejected. Run the local launcher with -Reconfigure.",
-    WEBHOOK_ACTIVE: "This bot has an active webhook. Use a dedicated bot or remove its existing webhook first.",
-    POLLING_CONFLICT: "Another service is polling this bot, or a webhook is active. Run only one enrollment process.",
-    RATE_LIMITED: "Telegram is temporarily rate limiting this bot. Enrollment will retry.",
-    URLError: "Cannot reach Telegram. Check this computer’s internet connection."
-  };
-  async function recipientRequest(url, options = {}) {
-    const response = await apiFetch(url, options);
-    let data;
-    try { data = await response.json(); }
-    catch (_) { throw new Error("The server returned an unreadable response."); }
-    if (!response.ok) {
-      const error = new Error(data.error || "Recipient request failed.");
-      error.status = response.status;
-      throw error;
-    }
-    return data;
+  let phoneData = null, phoneLoading = false, phoneLoadedAt = -Infinity, phoneInviteExpires = 0;
+  let activePhoneInvite = null, activePhoneOrigin = null, phoneInviteChecking = false, sendingPhoneTest = false;
+  let phoneWorkspaceReady = false;
+  const postJSON = value => ({method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(value)});
+  async function phoneAdmin(path = "", payload) {
+    const base = $("phoneWorkspaceSelect").value === "demo" ? "/api/phone-demo-admin" : "/api/phone-admin";
+    return readResponse(await apiFetch(base + path, payload === undefined ? {} : postJSON(payload)));
   }
-  function clearRecipientInvite() {
-    recipientInviteExpiresAt = 0;
-    $("recipientInvite").hidden = true;
-    $("recipientQr").removeAttribute("src");
-    $("recipientLink").removeAttribute("href");
-  }
-  function recipientControls() {
-    $("createRecipientInvite").disabled = !recipientAdminUnlocked || !recipientBotReady;
-    $("sendRecipientTest").disabled = !recipientAdminUnlocked || !recipientBotReady || recipientActiveCount === 0;
-  }
-  async function loadEnrollmentStatus() {
-    if (recipientStatusPending) return;
-    recipientStatusPending = true;
-    try {
-      const data = await recipientRequest("/api/telegram/status");
-      const wasUnlocked = recipientAdminUnlocked;
-      recipientBotReady = data.bot_ready === true;
-      recipientAdminUnlocked = data.configured === true;
-      $("recipientSetup").hidden = data.configured;
-      $("recipientAdmin").hidden = !recipientAdminUnlocked;
-      if (!recipientAdminUnlocked && wasUnlocked) {
-        clearRecipientInvite(); $("recipientRows").replaceChildren(); delete $("recipientRows").dataset.signature;
-        recipientMessage("Telegram bot configuration is unavailable. Restart the backend after configuring the bot.");
-      }
-      if (!data.configured) recipientMessage("Live enrollment is waiting for your bot setup. Follow the local setup steps above.");
-      else if (!recipientBotReady) recipientMessage(data.bot_error
-        ? botErrorLabels[data.bot_error] || "Telegram connection needs attention. Check the local server."
-        : "Connecting to Telegram bot…");
-      recipientControls();
-      if (recipientAdminUnlocked) await loadRecipients(true);
-    } catch (error) { recipientMessage(error.message, "error"); }
-    finally { recipientStatusAt = Date.now(); recipientStatusPending = false; }
-  }
-  function recipientMessage(message, tone = "") {
-    text("recipientMessage", message);
-    $("recipientMessage").className = "form-message " + tone;
-  }
-  function renderRecipientRows(rows) {
-    const list = $("recipientRows");
-    const signature = JSON.stringify(rows);
-    if (list.dataset.signature === signature) return;
-    list.dataset.signature = signature;
-    list.replaceChildren();
-    text("recipientTotal", rows.length);
-    if (!rows.length) {
-      const empty = document.createElement("div");
+  $("phoneWorkspaceSelect").addEventListener("change", () => {
+    $("phoneLinked").hidden = true;
+    $("phoneDeviceRows").replaceChildren();
+    delete $("phoneDeviceRows").dataset.devices;
+    text("phoneMessage", "");
+    loadPhoneDevices(true);
+  });
+  function renderPhoneDevices(devices) {
+    const rows = $("phoneDeviceRows");
+    text("phoneDeviceCount", devices.length);
+    const signature = JSON.stringify(devices);
+    if (rows.dataset.devices === signature) return;
+    rows.dataset.devices = signature;
+    rows.replaceChildren();
+    if (!devices.length) {
+      const empty = document.createElement("p");
       empty.className = "recipient-empty";
-      empty.innerHTML = icon("bell") + '<strong>Your alert team starts here</strong><p>Create an opt-in QR and ask someone to scan it, then tap Start in Telegram.</p>';
-      list.append(empty);
+      empty.textContent = "No linked devices yet. Generate a QR to add one.";
+      rows.append(empty);
       return;
     }
-    rows.forEach(recipient => {
-      const row = document.createElement("article");
-      row.className = "recipient-row";
+    for (const device of devices) {
+      const row = document.createElement("div"), details = document.createElement("div");
+      row.className = "recipient-row"; details.className = "recipient-identity";
+      const name = document.createElement("strong"), state = document.createElement("span");
+      name.textContent = device.name;
+      state.textContent = device.role === "responder" ? "Campus security" : "Alert recipient";
+      const delivery = document.createElement("span");
+      delivery.className = "recipient-status " + (device.subscribed ? "is-active" : "is-paused");
+      delivery.textContent = device.subscribed ? "Notifications on" : "Notifications off";
+      const revoke = document.createElement("button");
+      revoke.type = "button"; revoke.className = "button secondary small-button"; revoke.textContent = "Unlink";
+      revoke.setAttribute("aria-label", "Unlink " + device.name);
+      revoke.addEventListener("click", async () => {
+        if (!window.confirm("Unlink " + device.name + "?")) return;
+        revoke.disabled = true;
+        try {
+          await phoneAdmin("/revoke", {id: device.id});
+          if ($("phoneLinked").dataset.deviceId === device.id) $("phoneLinked").hidden = true;
+          await loadPhoneDevices(true);
+          text("phoneMessage", "Device unlinked.");
+        }
+        catch (error) { text("phoneMessage", error.message); revoke.disabled = false; }
+      });
       const avatar = document.createElement("span");
       avatar.className = "recipient-avatar";
       avatar.setAttribute("aria-hidden", "true");
-      avatar.textContent = (recipient.name || "Telegram recipient").trim().split(/\s+/).slice(0, 2).map(word => Array.from(word)[0] || "").join("").toUpperCase();
-      const details = document.createElement("div");
-      details.className = "recipient-identity";
-      const name = document.createElement("strong");
-      name.textContent = recipient.name || "Telegram recipient";
-      const username = document.createElement("span");
-      username.textContent = recipient.username ? "@" + recipient.username : "Connected via Telegram";
-      details.append(name, username);
-      const badge = document.createElement("span");
-      badge.className = "recipient-status " + (recipient.active ? "is-active" : "is-paused");
-      badge.textContent = recipient.active ? "Active" : "Paused";
-      const remove = document.createElement("button");
-      remove.className = "recipient-remove";
-      remove.type = "button";
-      remove.textContent = "Remove";
-      remove.setAttribute("aria-label", "Remove " + (recipient.name || "recipient") + " from alerts");
-      remove.addEventListener("click", async () => {
-        remove.disabled = true;
-        try {
-          await recipientRequest("/api/telegram/recipients", {
-            method: "DELETE",
-            headers: {"Content-Type": "application/json"},
-            body: JSON.stringify({chat_id: recipient.chat_id})
-          });
-          await loadRecipients(true);
-          recipientMessage("Recipient removed.", "success");
-        } catch (error) { recipientMessage(error.message, "error"); remove.disabled = false; }
-      });
-      row.append(avatar, details, badge, remove);
-      list.append(row);
-    });
-  }
-  async function loadRecipients(force = false) {
-    if (!recipientAdminUnlocked || recipientRequestPending || (!force && Date.now() - recipientRefreshAt < 2500)) return;
-    recipientRequestPending = true;
-    try {
-      const data = await recipientRequest("/api/telegram/recipients");
-      recipientActiveCount = (data.recipients || []).filter(r => r.active).length;
-      recipientBotReady = Boolean(data.bot_username && !data.bot_error);
-      renderRecipientRows(data.recipients || []);
-      $("recipientBotStatus").dataset.state = data.bot_error ? "error" : data.bot_username ? "connected" : "pending";
-      recipientControls();
-      text("recipientBotStatus", data.bot_error
-        ? botErrorLabels[data.bot_error] || "Telegram bot connection needs attention: " + data.bot_error
-        : data.bot_username
-          ? "Connected to @" + data.bot_username + " · " + (data.recipients || []).filter(r => r.active).length + " active recipient(s)"
-          : "Connecting to Telegram bot…");
-      recipientRefreshAt = Date.now();
-    } catch (error) {
-      if (error.status === 403) {
-        recipientAdminUnlocked = false;
-        $("recipientAdmin").hidden = true;
-        clearRecipientInvite();
-      }
-      recipientMessage(error.message, "error");
-    } finally { recipientRequestPending = false; }
-  }
-  $("createRecipientInvite").addEventListener("click", async event => {
-    event.currentTarget.disabled = true;
-    try {
-      const data = await recipientRequest("/api/telegram/invite", {method: "POST"});
-      if (!/^https:\/\/t\.me\/[A-Za-z0-9_]+\?start=[A-Za-z0-9_-]+$/.test(data.url) ||
-          !data.qr_data_url?.startsWith("data:image/png;base64,") || !Number.isFinite(data.expires_at)) {
-        throw new Error("The server returned an invalid Telegram invite.");
-      }
-      recipientInviteExpiresAt = data.expires_at * 1000;
-      $("recipientQr").src = data.qr_data_url;
-      $("recipientLink").href = data.url;
-      $("recipientLink").textContent = "Open @" + (data.url.match(/t\.me\/([^?]+)/)?.[1] || "Telegram bot");
-      $("recipientInvite").hidden = false;
-      recipientMessage("QR invite created. It expires in one hour.", "success");
-      updateRecipientInvite();
-    } catch (error) { recipientMessage(error.message, "error"); }
-    finally { recipientControls(); }
-  });
-  $("revokeRecipientInvite").addEventListener("click", async () => {
-    try {
-      await recipientRequest("/api/telegram/invite/revoke", {method: "POST"});
-      clearRecipientInvite();
-      recipientMessage("Invite revoked. Existing recipients remain enrolled.", "success");
-    } catch (error) { recipientMessage(error.message, "error"); }
-  });
-  $("sendRecipientTest").addEventListener("click", async event => {
-    event.currentTarget.disabled = true;
-    try {
-      const data = await recipientRequest("/api/telegram/test", {method: "POST"});
-      recipientMessage("Test notification accepted by Telegram for " + data.delivered + " recipient(s). Check phone notification settings.", "success");
-    } catch (error) { recipientMessage(error.message, "error"); }
-    finally { recipientControls(); }
-  });
-  function updateRecipientInvite() {
-    if (!recipientInviteExpiresAt) return;
-    const seconds = Math.max(0, Math.ceil((recipientInviteExpiresAt - Date.now()) / 1000));
-    if (seconds === 0) {
-      clearRecipientInvite();
-      recipientMessage("This invite has expired. Create a new opt-in QR to connect another recipient.");
-    } else text("recipientInviteExpiry", "Tap Start in Telegram to opt in. Invite expires in " +
-      Math.floor(seconds / 60) + "m " + String(seconds % 60).padStart(2, "0") + "s.");
-  }
-
-  async function checkAlertRecipientsSetup() {
-    if (cautionBypassedThisSession) return true;
-    if (status?.telegram?.has_recipients || (status?.telegram?.recipient_count && status.telegram.recipient_count > 0)) {
-      return true;
+      avatar.textContent = device.name.trim().charAt(0).toUpperCase();
+      details.append(name);
+      if (device.role === "responder") details.append(state);
+      row.append(avatar, details, delivery, revoke); rows.append(row);
     }
-    if (recipientActiveCount > 0) {
-      return true;
-    }
+  }
+  async function loadPhoneDevices(force = false) {
+    if (!status.incident_history || phoneLoading || (!force && Date.now() - phoneLoadedAt < 3500)) return;
+    $("phonePanel").hidden = false;
+    phoneLoading = true; phoneLoadedAt = Date.now();
+    const workspaceSelect = $("phoneWorkspaceSelect");
+    workspaceSelect.disabled = true;
     try {
-      const data = await recipientRequest("/api/telegram/status");
-      if (data?.has_recipients || (typeof data?.recipient_count === "number" && data.recipient_count > 0)) {
-        recipientActiveCount = data.recipient_count || 1;
-        return true;
+      let data = await phoneAdmin();
+      if (!phoneWorkspaceReady && data.demo_available) {
+        workspaceSelect.value = "demo";
+        data = await phoneAdmin();
       }
+      if (workspaceSelect.value === "demo") $("phoneWorkspacePicker").hidden = false;
+      phoneData = data;
+      phoneWorkspaceReady = true;
+      if (phoneData.demo_available) $("phoneWorkspacePicker").hidden = false;
+      text("phoneWorkspace", workspaceSelect.value === "demo" || status.inference_mode === "synthetic" ?
+        "Public phone app · Detection notices" : "Protected phone app · Camera alerts");
+      $("phoneWorkspace").hidden = false;
+      if (activePhoneInvite && phoneData.origin && activePhoneOrigin !== phoneData.origin) {
+        clearPhoneInvite();
+        text("phoneMessage", "The phone address changed. Generate a new QR.");
+      }
+      text("phoneInviteButton", phoneData.phone_https ? "Generate QR" : "Create local invite");
+      $("phoneTestButton").disabled = sendingPhoneTest || !phoneData.devices.some(device => device.role === "recipient");
+      const notice = !phoneData.phone_https ? "Configure recipient HTTPS on this server to generate a phone QR." :
+        phoneData.phone_https && !phoneData.push ? "Background notifications are unavailable for this workspace." : "";
+      text("phonePushState", notice);
+      $("phonePushState").hidden = !notice;
+      renderPhoneDevices(phoneData.devices);
+      const confirmation = $("phoneLinked");
+      if (!confirmation.hidden) {
+        const device = phoneData.devices.find(device => device.id === confirmation.dataset.deviceId);
+        confirmation.hidden = !device;
+        confirmation.querySelector("p").hidden = !!device?.subscribed;
+      }
+    } catch (error) { text("phoneMessage", error.message); }
+    finally {
+      phoneLoading = false;
+      workspaceSelect.disabled = !!activePhoneInvite || sendingPhoneTest;
+      $("phoneInviteButton").disabled = !phoneWorkspaceReady || !!activePhoneInvite;
+    }
+  }
+  function clearPhoneInvite() {
+    activePhoneInvite = null;
+    activePhoneOrigin = null;
+    phoneInviteExpires = 0;
+    $("phoneInvite").hidden = true;
+    $("phoneInviteQR").removeAttribute("src");
+    text("phoneInviteAddress", "");
+    $("phoneInviteCode").value = "";
+    $("phoneInviteLink").removeAttribute("href");
+    $("phoneInviteManual").open = false;
+    $("phoneInviteButton").disabled = false;
+    $("phoneWorkspaceSelect").disabled = phoneLoading || sendingPhoneTest;
+  }
+  function showPhoneInviteResult(result) {
+    if (result.status === "waiting") {
+      text("phoneInviteStatus", "Waiting for phone");
+      return;
+    }
+    clearPhoneInvite();
+    if (result.status === "linked") {
+      text("phoneMessage", "");
+      text("phoneLinkedName", result.device.name + " linked");
+      $("phoneLinked").dataset.deviceId = result.device.id;
+      $("phoneLinked").querySelector("p").hidden = result.device.subscribed;
+      $("phoneLinked").hidden = false;
+      loadPhoneDevices(true);
+      return;
+    }
+    text("phoneMessage", result.status === "canceled" ? "Invite canceled. You can generate a new QR." :
+      "The invite expired. Generate a new QR.");
+  }
+  async function checkPhoneInvite() {
+    if (!activePhoneInvite || phoneInviteChecking || $("phoneInviteCancel").disabled) return;
+    const code = activePhoneInvite;
+    phoneInviteChecking = true;
+    try {
+      const result = await phoneAdmin("/invite/progress", {code});
+      if (activePhoneInvite === code && !$("phoneInviteCancel").disabled) showPhoneInviteResult(result);
     } catch (_) {
-      if (status?.telegram?.has_recipients) return true;
-    }
-    return false;
+      if (activePhoneInvite === code && !$("phoneInviteCancel").disabled) text("phoneInviteStatus", "Reconnecting to check invite…");
+    } finally { phoneInviteChecking = false; }
   }
-
+  $("phoneInviteButton").addEventListener("click", async event => {
+    if (!phoneWorkspaceReady || phoneLoading || activePhoneInvite) return;
+    const button = event.currentTarget; button.disabled = true;
+    $("phoneWorkspaceSelect").disabled = true;
+    try {
+      const invite = await phoneAdmin("/invite", {role: "recipient"});
+      $("phoneLinked").hidden = true;
+      const qr = $("phoneInviteQR");
+      const inviteUrl = new URL(invite.url);
+      const scannable = invite.qr && inviteUrl.protocol === "https:";
+      qr.hidden = !scannable;
+      if (scannable) qr.src = invite.qr; else qr.removeAttribute("src");
+      $("phoneInviteLink").href = invite.url; $("phoneInviteCode").value = invite.code;
+      text("phoneInviteLink", scannable ? "Open invitation" : "Open local preview invitation");
+      phoneInviteExpires = invite.expires * 1000;
+      activePhoneInvite = invite.code;
+      activePhoneOrigin = inviteUrl.origin;
+      $("phoneInvite").hidden = false;
+      $("phoneInviteManual").open = !scannable;
+      text("phoneInviteAddress", inviteUrl.host);
+      text("phoneInviteHelp", scannable ? (inviteUrl.hostname.endsWith(".trycloudflare.com") ?
+        "Sign in with the Cloudflare email code on your phone, then scan this QR." : "Scan with your phone camera to link RakshaNetra.") :
+        "Use this invite on this computer.");
+      text("phoneInviteStatus", "Waiting for phone");
+      text("phoneMessage", scannable ? "" :
+        "This invite is for this computer. Configure a reachable HTTPS address to scan an invite from a phone.");
+      updatePhoneInvite();
+    } catch (error) { text("phoneMessage", error.message); }
+    finally { button.disabled = !!activePhoneInvite; $("phoneWorkspaceSelect").disabled = phoneLoading || !!activePhoneInvite || sendingPhoneTest; }
+  });
+  $("phoneInviteCancel").addEventListener("click", async event => {
+    if (!activePhoneInvite) return;
+    const button = event.currentTarget;
+    button.disabled = true;
+    text("phoneInviteStatus", "Canceling invite…");
+    try {
+      const result = await phoneAdmin("/invite/cancel", {code: activePhoneInvite});
+      showPhoneInviteResult(result);
+      $("phoneInviteButton").focus();
+    } catch (error) {
+      text("phoneInviteStatus", "Checking invite…");
+      text("phoneMessage", error.message);
+    } finally { button.disabled = false; }
+  });
+  function updatePhoneInvite() {
+    if (!activePhoneInvite) return;
+    const seconds = Math.max(0, Math.ceil((phoneInviteExpires - Date.now()) / 1000));
+    text("phoneInviteExpiry", seconds ? "Expires in " + Math.floor(seconds / 60) + ":" +
+      String(seconds % 60).padStart(2, "0") : "Checking final invite status…");
+    checkPhoneInvite();
+  }
+  $("phoneInviteCode").addEventListener("focus", event => event.currentTarget.select());
+  $("phoneTestButton").addEventListener("click", async event => {
+    if (sendingPhoneTest) return;
+    sendingPhoneTest = true;
+    $("phoneWorkspaceSelect").disabled = true;
+    const button = event.currentTarget; button.disabled = true;
+    try {
+      const result = await phoneAdmin("/test", {});
+      const count = (result.delivery.queued || 0) + (result.delivery.accepted || 0);
+      text("phoneMessage", count ? "Test alert queued for " + count + (count === 1 ? " device." : " devices.") :
+        "Test added to the app inbox. Enable notifications in the app to receive it in the background.");
+      historyRequestedAt = -Infinity; refreshSavedIncidents();
+    } catch (error) { text("phoneMessage", error.message); }
+    finally {
+      sendingPhoneTest = false;
+      $("phoneWorkspaceSelect").disabled = phoneLoading || !!activePhoneInvite;
+      button.disabled = !phoneData?.devices.some(device => device.role === "recipient");
+    }
+  });
   async function verifyRecipientBeforeAction(actionCallback) {
     let isSetup = false;
     try {
-      isSetup = await checkAlertRecipientsSetup();
+      if (status.incident_history && !cautionBypassedThisSession) await loadPhoneDevices();
+      isSetup = cautionBypassedThisSession || !!(phoneData?.push && phoneData.devices.some(device => device.role === "recipient" && device.subscribed));
     } catch (_) {
       isSetup = false;
     }
@@ -694,9 +724,9 @@ if (typeof document !== "undefined") (() => {
       closeDialog("recipientCautionDialog");
       closeDialog("sourceModal");
       window.location.hash = "#recipients";
-      toast("Set up an alert recipient below or scan the Telegram QR code.", "info");
+      toast("Create a phone invite below.", "info");
       setTimeout(() => {
-        const createButton = $("createRecipientInvite");
+        const createButton = $("phoneInviteButton");
           if (createButton && !createButton.disabled && createButton.offsetParent !== null) {
             createButton.focus();
         }
@@ -712,9 +742,9 @@ if (typeof document !== "undefined") (() => {
           sessionStorage.setItem("rakshanetra.caution_bypassed", "true");
         } catch (_) {}
       }
-      closeDialog("recipientCautionDialog");
       const action = pendingCautionAction;
       pendingCautionAction = null;
+      closeDialog("recipientCautionDialog");
       if (typeof action === "function") {
         action();
       }
@@ -1064,7 +1094,36 @@ if (typeof document !== "undefined") (() => {
     }
   }
 
-  function entries() { return [...alertStore.values()].sort((a, b) => b.serial - a.serial); }
+  function entries() { return [...alertStore.values()].sort((a, b) => b.firstSeen - a.firstSeen || b.serial - a.serial); }
+  let historyRequestedAt = -Infinity, historyLoading = false;
+  async function refreshSavedIncidents() {
+    if (!status.incident_history || historyLoading || Date.now() - historyRequestedAt < 2500) return;
+    historyRequestedAt = Date.now();
+    historyLoading = true;
+    try {
+      const {incidents} = await readResponse(await apiFetch("/api/incidents"));
+      for (const record of incidents.slice(0, RakshaUI.MAX_STORED_ALERTS)) {
+        const kind = RakshaUI.category(record.category), id = RakshaUI.savedKey(record.id, kind);
+        let entry = alertStore.get(id);
+        if (!entry) {
+          entry = {id, savedId: record.id, kind, start: record.source_time, end: record.source_time,
+            active: false, uncertain: false, snapshot: null, reason: "Review the incident evidence before acting."};
+          alertStore.set(id, entry);
+        }
+        Object.assign(entry, {
+          serial: record.sequence, title: record.title, review: record.review,
+          source: record.source, camera: record.camera, site: record.site, severity: record.severity, score: score(record.confidence),
+          firstSeen: record.observed_at * 1000, test: !!record.test, recorded: true, clip: record.clip
+        });
+      }
+      render();
+      if ($("incidentDialog").open && alertStore.has(selectedIncident)) {
+        renderIncidentClip(alertStore.get(selectedIncident));
+        refreshIncidentActivity(alertStore.get(selectedIncident));
+      }
+    } catch (_) { /* Live monitoring remains available when history storage is unavailable. */ }
+    finally { historyLoading = false; }
+  }
   function orderedNodes(parent, desired) {
     const allowed = new Set(desired);
     for (const child of [...parent.children]) if (!allowed.has(child)) child.remove();
@@ -1174,40 +1233,95 @@ if (typeof document !== "undefined") (() => {
     const button = event.target.closest('[data-action="review"]');
     if (button) openIncident(button.closest("[data-id]").dataset.id);
   });
+  function renderIncidentClip(entry) {
+    const video = $("incidentClip");
+    const url = entry.savedId && entry.clip === "ready"
+      ? endpoint("/api/incidents/" + entry.savedId + "/clip.mp4") : "";
+    if (url && video.getAttribute("src") !== url) video.src = url;
+    if (!url && video.hasAttribute("src")) video.removeAttribute("src");
+    video.hidden = !url;
+    text("incidentClipStatus", entry.clip === "processing" ? "Preparing incident clip…" :
+      entry.clip === "unavailable" && !entry.test ? "Incident video is unavailable." : "");
+  }
+  async function refreshIncidentActivity(entry) {
+    if (!entry.savedId) return;
+    try {
+      const data = await readResponse(await apiFetch("/api/incidents/" + entry.savedId));
+      if (!$("incidentDialog").open || selectedIncident !== entry.id) return;
+      const pushLabels = {queued: "queued", accepted: "accepted by the push provider", failed: "failed", expired: "subscription expired"};
+      const counts = Object.entries(data.delivery || {}).map(([state, count]) => count + " " + (pushLabels[state] || state));
+      text("incidentDelivery", counts.length ? "Push attempts · " + counts.join(" · ") : "");
+      const labels = {opened: "Opened", escalated: "Forwarded to campus security", "responder-acknowledged": "Campus security acknowledged", ...reviewLabels};
+      const actions = data.actions.map(action => {
+        const row = document.createElement("li");
+        row.textContent = [labels[action.action] || action.action, action.actor,
+          new Date(action.created_at * 1000).toLocaleString(), action.note].filter(Boolean).join(" · ");
+        return row;
+      });
+      $("incidentActivity").replaceChildren(...actions);
+      $("incidentActivityPanel").hidden = actions.length === 0 && counts.length === 0;
+    } catch (_) { /* Reviews remain available if the activity list cannot be refreshed. */ }
+  }
   function openIncident(id) {
     const entry = alertStore.get(id); if (!entry) return;
     selectedIncident = id;
-    text("incidentDialogId", "RX-" + String(entry.serial).padStart(3, "0") + " · " + (entry.synthetic ? "SYNTHETIC DEMO" : entry.active ? "ACTIVE DETECTION" : "RECORDED INCIDENT"));
+    text("incidentDialogId", "RX-" + String(entry.serial).padStart(3, "0") + " · " + (entry.test ? "TEST ALERT" : entry.synthetic ? "SYNTHETIC DEMO" : entry.active ? "ACTIVE DETECTION" : "RECORDED INCIDENT"));
     text("incidentDialogTitle", entry.title);
     $("incidentDetails").innerHTML = [
-      ["Camera", "CAM-01 · " + entry.camera], ["Source time", sourceTime(entry.start) + " – " + sourceTime(entry.end)],
-      ["Source", entry.source], [entry.kind === "fight" ? "Fight model score" : "Detection score", entry.score === null ? "Not retained" : Math.round(entry.score * 100) + "%"]
+      ["Camera", [entry.site, entry.camera].filter(Boolean).join(" · ")],
+      [entry.recorded ? "Observed at" : "Source time", entry.recorded ? new Date(entry.firstSeen).toLocaleString() : sourceTime(entry.start) + " – " + sourceTime(entry.end)],
+      ["Source", entry.source], ...(entry.severity ? [["Priority", entry.severity]] : []),
+      [entry.kind === "fight" ? "Fight model score" : "Detection score", entry.score === null ? "Not retained" : Math.round(entry.score * 100) + "%"]
     ].map(([label, value]) => "<div><dt>" + esc(label) + "</dt><dd>" + esc(value) + "</dd></div>").join("");
     text("incidentReason", entry.reason);
+    text("reviewScope", entry.savedId ? "Saved to the shared incident record." : "Saved in this browser session.");
     $("reviewOutcome").value = entry.review;
-    $("snapshotImage").hidden = !entry.snapshot; $("snapshotEmpty").hidden = !!entry.snapshot;
-    if (entry.snapshot) $("snapshotImage").src = entry.snapshot; else $("snapshotImage").removeAttribute("src");
-    text("snapshotCaption", entry.snapshot ? "Snapshot captured when this incident appeared in your inbox; source frames may have advanced." : "No event snapshot was retained. The current camera view may show different activity.");
+    const snapshot = entry.savedId
+      ? (entry.test ? "" : endpoint("/api/incidents/" + entry.savedId + "/thumbnail.jpg"))
+      : entry.snapshot;
+    $("snapshotImage").hidden = !snapshot; $("snapshotEmpty").hidden = !!snapshot;
+    if (snapshot) $("snapshotImage").src = snapshot; else $("snapshotImage").removeAttribute("src");
+    text("snapshotCaption", snapshot ? "Snapshot from around the time of the event." : "No event snapshot was retained.");
+    renderIncidentClip(entry);
+    $("incidentActivityPanel").hidden = true;
     showDialog("incidentDialog");
+    refreshIncidentActivity(entry);
   }
-  $("saveReviewButton").addEventListener("click", () => {
+  $("snapshotImage").addEventListener("error", () => { $("snapshotImage").hidden = true; $("snapshotEmpty").hidden = false; });
+  $("incidentDialog").addEventListener("close", () => {
+    $("incidentClip").removeAttribute("src");
+    if (!$("incidentClip").hidden) $("incidentClip").load();
+    $("incidentClip").hidden = true;
+  });
+  $("saveReviewButton").addEventListener("click", async () => {
     const entry = alertStore.get(selectedIncident); if (!entry) return;
-    entry.review = $("reviewOutcome").value;
-    closeDialog("incidentDialog"); renderAlerts(); renderHistory(); toast("Assessment saved for this browser session.");
+    const action = $("reviewOutcome").value, button = $("saveReviewButton");
+    button.disabled = true;
+    try {
+      if (entry.savedId) {
+        await readResponse(await apiFetch("/api/incidents/" + entry.savedId + "/review", {
+          method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({action})
+        }));
+      }
+      entry.review = action;
+      closeDialog("incidentDialog"); renderAlerts(); renderHistory(); toast("Assessment saved.");
+    } catch (error) { toast(error.message, "error"); }
+    finally { button.disabled = false; }
   });
   $("viewIncidentCamera").addEventListener("click", () => {
     closeDialog("incidentDialog"); window.location.hash = "monitoring"; setLayout("focus");
   });
   $("exportButton").addEventListener("click", () => {
     const cell = RakshaUI.csvCell;
-    const rows = [["Incident", "Event", "Camera", "Source", "Start seconds", "End seconds", "Score", "Review", "Synthetic demo"]];
-    for (const e of entries()) rows.push(["RX-" + e.serial, e.title, e.camera, e.source, e.start, e.end, e.score ?? "", reviewLabels[e.review], e.synthetic]);
+    const rows = [["Incident", "Event", "Site", "Camera", "Source", "Observed at (UTC)", "Source seconds", "Score", "Review", "Test or synthetic"]];
+    for (const e of entries()) rows.push(["RX-" + e.serial, e.title, e.site, e.camera, e.source,
+      new Date(e.firstSeen).toISOString(), e.start, e.score ?? "", reviewLabels[e.review], Boolean(e.test || e.synthetic)]);
     const url = URL.createObjectURL(new Blob(["\uFEFF" + rows.map(row => row.map(cell).join(",")).join("\r\n")], {type: "text/csv;charset=utf-8"}));
-    const a = document.createElement("a"); a.href = url; a.download = "rakshanetra-session-incidents.csv"; a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000); toast("Session incident export downloaded.");
+    const a = document.createElement("a"); a.href = url; a.download = "rakshanetra-incidents.csv"; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000); toast("Incident export downloaded.");
   });
   async function captureSnapshots(newEntries) {
-    const active = newEntries.filter(e => e.active); if (!active.length) return;
+    const active = newEntries.filter(e => e.active && !e.savedId); if (!active.length) return;
     try {
       const response = await apiFetch("/snapshot.jpg", {}, 3000);
       if (!response.ok || !response.headers.get("Content-Type")?.startsWith("image/")) return;
@@ -1302,7 +1416,8 @@ if (typeof document !== "undefined") (() => {
     text("sourceAvailability", status.inference_mode === "synthetic" ? "Scripted mode: restart the server in model mode to use real sources." : "");
     text("webcamSupport", navigator.mediaDevices?.getUserMedia && window.isSecureContext ? "Camera access is requested only when you press Open webcam." : "This browser needs HTTPS or localhost for webcam access. You can still upload a video.");
     const notice = !connected ? "Detection server disconnected. Reconnecting…" : status.inference_mode === "synthetic" ? "Scripted demo mode. For real video, start: python ui.py --config config/default.json --source idle --judge-mode" : status.error ? "Source error: " + status.error : stale ? "No recent frames. Current detection status is unknown." : Object.keys(status.scenario_errors || {}).length ? "Some detection models need attention. Open Camera health or Diagnostics." : "";
-    text("serviceNotice", notice); $("serviceNotice").hidden = !notice; $("serviceNotice").dataset.tone = connected && !status.error ? "warning" : "error";
+    text("serviceNotice", notice);
+    $("serviceNotice").hidden = !notice; $("serviceNotice").dataset.tone = connected && !status.error ? "warning" : "error";
     if (notice && notice !== previousNotice && lastUpdate) toast(notice, status.error || !connected ? "error" : "info");
     previousNotice = notice;
     renderNotificationPreference();
@@ -1337,16 +1452,22 @@ if (typeof document !== "undefined") (() => {
       if (identity !== lastFrameIdentity) { lastFrameIdentity = identity; lastFrameAt = Date.now(); }
       lastUpdate = Date.now(); stale = isCapturing(next) && Date.now() - lastFrameAt > 6500;
       connected = true; expiredSession = false; status = next;
-      if (currentView === "recipients" && Date.now() - recipientStatusAt > 4000) loadEnrollmentStatus();
+      if (currentView === "recipients") {
+        loadPhoneDevices();
+      }
       const result = session.consume(status, Date.now(), !stale, preferences.camera, displaySource());
       for (const entry of result.evicted) {
         if (entry.snapshot) URL.revokeObjectURL(entry.snapshot);
         cardNodes.delete(entry.id); rowNodes.delete(entry.id);
       }
-      checkPendingSource(status); render(); captureSnapshots(result.created.filter(entry => entry.active)); notifyIncidents(result.created);
+      checkPendingSource(status); render(); refreshSavedIncidents(); captureSnapshots(result.created.filter(entry => entry.active)); notifyIncidents(result.created);
     } catch (_) {
       connected = false; session.disconnect(); render();
       if (expiredSession) {
+        if (activePhoneInvite) {
+          clearPhoneInvite();
+          text("phoneMessage", "Reload this dashboard before generating another QR.");
+        }
         text("feedStateTitle", "Session expired"); text("feedStateDescription", "Reload the workspace to establish a new session.");
         text("retryStreamButton", "Reload workspace"); $("retryStreamButton").hidden = false;
       }
@@ -1364,5 +1485,8 @@ if (typeof document !== "undefined") (() => {
     for (const entry of alertStore.values()) if (entry.snapshot) URL.revokeObjectURL(entry.snapshot);
   });
   applyPreferences(); navigate(); pollBackend(); loadCapabilities();
-  setInterval(() => { updateClock(); updateFreshness(); updateRecipientInvite(); }, 1000);
+  setInterval(() => {
+    updateClock(); updateFreshness();
+    updatePhoneInvite();
+  }, 1000);
 })();

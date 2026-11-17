@@ -16,6 +16,8 @@ import math
 from numbers import Real
 from dataclasses import asdict, dataclass, field
 
+from core.gpu import cuda_device_name
+
 
 @dataclass
 class FightGraphConfig:
@@ -30,7 +32,7 @@ class FightModelConfig:
     checkpoint: str = "models/stgcnpp/best_fight_stgcnpp_v1.pth"
     num_classes: int = 2  # 0=NO_FIGHT, 1=FIGHT
     freeze_backbone: bool = True  # Prompt 04 default: prove arch before training
-    device: str = "auto"  # auto -> cuda if available else cpu
+    device: str = "auto"  # inherit detector CUDA device
     autoload: bool = False  # load weights during Pipeline init when file exists
 
 
@@ -61,7 +63,7 @@ class VigilanceConfig:
     source: str = "0"  # "0" = webcam, else video/image path
     fps: float = 30.0  # fallback when capture FPS is unreadable
     imgsz: int = 640
-    device: str = "auto"  # "auto" | "cpu" | "cuda" | "cuda:0" ...
+    device: str = "cuda"  # cuda / cuda:<index>; legacy auto also requires CUDA
     conf: float = 0.25
     # Safety cap only: the scene is NEVER truncated to 2 people. The
     # registry keeps every identity the detector reports up to this cap.
@@ -94,17 +96,6 @@ class VigilanceConfig:
         False  # True -> re-raise scenario errors (debug); False -> log + continue
     )
     log_level: str = "INFO"
-    # --- telegram incident alerts (token via VIGILANCE_TELEGRAM_BOT_TOKEN env) ---
-    telegram_enabled: bool = False
-    telegram_bot_token: str = ""
-    telegram_chat_id: str = ""
-    telegram_recipients_db: str = "evidence/telegram_recipients.sqlite3"
-    telegram_cooldown_sec: float = 60.0
-    telegram_notify_fight: bool = True
-    telegram_notify_fall: bool = True
-    telegram_notify_fire: bool = True
-    telegram_notify_bag: bool = True
-    telegram_notify_weapon: bool = True
 
     # ------------------------------------------------------------------
     def to_dict(self) -> dict:
@@ -216,16 +207,6 @@ class VigilanceConfig:
             ("evidence_dir", str),
             ("strict", bool),
             ("log_level", str),
-            ("telegram_enabled", bool),
-            ("telegram_bot_token", str),
-            ("telegram_chat_id", str),
-            ("telegram_recipients_db", str),
-            ("telegram_cooldown_sec", float),
-            ("telegram_notify_fight", bool),
-            ("telegram_notify_fall", bool),
-            ("telegram_notify_fire", bool),
-            ("telegram_notify_bag", bool),
-            ("telegram_notify_weapon", bool),
             ("fight_pair_max_distance", float),
             ("fight_min_person_visibility", float),
             ("fight_max_candidate_pairs", int),
@@ -332,17 +313,13 @@ class VigilanceConfig:
                     raise ValueError(f"{name} must be a boolean")
         if self.imgsz < 32 or self.imgsz % 32:
             raise ValueError("imgsz must be a positive multiple of 32")
-        if self.device not in ("auto", "cpu", "cuda") and not self.device.startswith(
-            "cuda:"
-        ):
-            raise ValueError("invalid detector device")
+        cuda_device_name(self.device)
         if not 0 <= self.fall_angle_deg <= 90:
             raise ValueError("fall angle must be in [0,90]")
         for name in (
             "fall_stillness_sec",
             "fall_min_visible_sec",
             "bag_confirm_sec",
-            "telegram_cooldown_sec",
         ):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} must be >= 0")
@@ -382,8 +359,7 @@ class VigilanceConfig:
             raise ValueError("invalid graph count thresholds")
         if mc.num_classes != 2:
             raise ValueError("fight.model.num_classes must be 2 (NO_FIGHT/FIGHT)")
-        if mc.device not in ("auto", "cpu", "cuda"):
-            raise ValueError("fight.model.device must be auto/cpu/cuda")
+        cuda_device_name(mc.device)
 
 
 DEFAULT_CONFIG = VigilanceConfig()

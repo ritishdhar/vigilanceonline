@@ -29,6 +29,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import quote
 
 from core.logging_utils import get_logger
+from core.gpu import cuda_device_name
 from core.model_security import download_verified, file_sha256, load_yolo
 from core.paths import ROOT
 
@@ -92,7 +93,7 @@ class SurveillanceThreatDetector:
         high_conf: float = 0.85,
         confirm_frames: int = 3,
         imgsz: int = 640,
-        device: str = "auto",
+        device: str = "cuda",
         bag_proximity_px: float = 150.0,
         enable_weapon_alerts: bool = False,
         enable_fire_alerts: bool = True,
@@ -111,7 +112,7 @@ class SurveillanceThreatDetector:
         self.high_conf = float(high_conf)
         self.confirm_frames = max(1, int(confirm_frames))
         self.imgsz = int(imgsz)
-        self.device = device
+        self.device = cuda_device_name(device)
         self.bag_proximity_px = float(bag_proximity_px)
         self.enable_weapon_alerts = bool(enable_weapon_alerts)
         self.enable_fire_alerts = bool(enable_fire_alerts)
@@ -205,8 +206,7 @@ class SurveillanceThreatDetector:
         if model is None:
             return []
         kwargs = {"conf": self.conf, "imgsz": self.imgsz, "verbose": False}
-        if self.device != "auto":
-            kwargs["device"] = self.device
+        kwargs["device"] = self.device
         results = model.predict(frame, **kwargs)
         if not results:
             return []

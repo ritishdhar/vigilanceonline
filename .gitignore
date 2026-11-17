@@ -11,6 +11,11 @@ evidence/
 .runtime-tests/
 .pytest_cache/
 *.pth
+# Keep model weights and generated training artifacts local.
+/models/**
+!/models/README.md
+!/models/manifest.json
+!/models/regression.json
 *.part
 .coverage
 

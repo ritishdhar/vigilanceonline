@@ -232,8 +232,8 @@ def test_ui_source_defaults_to_config_value():
 
 def test_ui_device_option():
     assert parse_args([]).device is None
-    assert parse_args(["--device", "cpu"]).device == "cpu"
     assert parse_args(["--device", "cuda"]).device == "cuda"
+    assert parse_args(["--device", "cuda:1"]).device == "cuda:1"
 
 
 def test_threats_opt_in_not_default():
@@ -403,64 +403,6 @@ class _FallenDetector:
         pass
 
 
-class _Recorder:
-    ready = True
-    sent_count = 0
-
-    def __init__(self):
-        self.calls = []
-
-    def maybe_notify(self, incident, jpeg=None):
-        self.calls.append(incident)
-        return incident is not None
-
-
-def test_fall_alert_reaches_notifier():
-    from config import VigilanceConfig
-    from core.pipeline import Pipeline
-    from tests.conftest import black_frames
-
-    cfg = VigilanceConfig()
-    assert cfg.enable_fall is True
-    pipe = Pipeline(config=cfg, detector=_FallenDetector())
-    rec = _Recorder()
-    state = LiveState()
-    pump = threading.Thread(
-        target=pump_frames,
-        args=(
-            state,
-            pipe,
-            "synthetic",
-            cfg.fps,
-            black_frames(60, h=240, w=320),
-            None,
-            rec,
-        ),
-        daemon=True,
-    )
-    pump.start()
-    try:
-        fired = False
-        for _ in range(400):
-            if any(c is not None for c in rec.calls):
-                fired = True
-                break
-            time.sleep(0.05)
-        assert fired, "fall incident never reached the notifier"
-        names = [n for c in rec.calls if c is not None for n in c.alerts]
-        assert "Fall Detection" in names
-    finally:
-        state.stop = True
-        pump.join(timeout=10)
-
-
-def test_status_reports_telegram_state(live_state):
-    port, _ = live_state
-    with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/status", timeout=5) as r:
-        body = json.loads(r.read())
-    assert body["telegram"] == {"enabled": False, "ready": False, "sent": 0}
-
-
 def test_upload_endpoint_accepts_avi(live_state):
     port, _ = live_state
     boundary = "----Viglance" + uuid.uuid4().hex
@@ -490,3 +432,43 @@ def test_unknown_route_404(live_state):
         assert exc.code == 404
     else:
         raise AssertionError("expected 404")
+
+
+@pytest.mark.parametrize("explicit_checkpoint", [False, True])
+def test_synthetic_startup_never_loads_installed_models(
+    tmp_path, monkeypatch, explicit_checkpoint
+):
+    import ui
+
+    checkpoint = tmp_path / "present.pth"
+    checkpoint.write_bytes(b"not a model; synthetic mode must not open it")
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {"fight_cfg": {"model": {"checkpoint": str(checkpoint), "autoload": True}}}
+        )
+    )
+
+    def unexpected_load(*args, **kwargs):
+        pytest.fail("synthetic startup attempted to load a real checkpoint")
+
+    class Server:
+        def __init__(self, *args):
+            pass
+
+        def serve_forever(self):
+            pass
+
+        def shutdown(self):
+            pass
+
+        def server_close(self):
+            pass
+
+    monkeypatch.setattr(ui.Pipeline, "load_fight_model", unexpected_load)
+    monkeypatch.setattr(ui, "BoundedHTTPServer", Server)
+    monkeypatch.setattr(ui, "pump_frames", lambda *args: None)
+    args = ["--synthetic", "--config", str(config_path)]
+    if explicit_checkpoint:
+        args += ["--fight-checkpoint", str(checkpoint)]
+    assert ui.main(args) == 0
