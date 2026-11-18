@@ -10,9 +10,10 @@ const html = fs.readFileSync(path.join(root, 'web/dashboard.html'), 'utf8').repl
 const script = fs.readFileSync(path.join(root, 'web/dashboard.js'), 'utf8');
 const flush = async () => { for (let i = 0; i < 15; i++) await new Promise(setImmediate); };
 
-async function app(phone) {
+async function app(phone, storage = {}) {
   const dom = new JSDOM(html, {url: 'https://judges.example/', runScripts: 'outside-only', pretendToBeVisual: true});
   const w = dom.window, calls = [], notices = [], errors = [], timers = [];
+  for (const [key, value] of Object.entries(storage)) w.localStorage.setItem(key, value);
   const status = {running: false, source: 'idle', source_generation: 0, model: {ready: true, head_trained: true}, timeline: [], inference_mode: 'model'};
   let tick = 0, permissionCalls = 0, stopped = 0;
   w.addEventListener('error', e => errors.push(e.message));
@@ -86,6 +87,83 @@ async function app(phone) {
     close: () => dom.window.close(), get permissionCalls() {return permissionCalls;}, get stopped() {return stopped;}};
 }
 
+test('weapon alerts stay in Active for ten seconds before moving into Recent', async () => {
+  const ui = await app();
+  let now = 100000;
+  ui.w.Date.now = () => now;
+  const event = {id: 'b'.repeat(32), start: 1, end: 1, scene: 'THREAT',
+    alerts: ['Weapon Threat'], confidence: .65, observed_at: now / 1000};
+  try {
+    await ui.poll({running: true, source: '0', source_generation: 1, frame: 1, ts: 1,
+      fight_status: 'ASSESSED', scene: {verdict: 'NO_FIGHT'}, timeline: [event],
+      active_event_ids: [event.id], alert_details: {'Weapon Threat': {confidence: .65}}});
+    assert.equal(ui.$('activeTabCount').textContent, '1');
+    assert.equal(ui.$('recentTabCount').textContent, '0');
+    now += 1000;
+    await ui.poll({frame: 2, ts: 2, active_event_ids: [], alert_details: {}});
+    assert.equal(ui.$('activeTabCount').textContent, '1');
+    assert.match(ui.$('alertsList').textContent, /NEW ALERT/);
+    ui.$('recentTab').click();
+    assert.equal(ui.$('alertsList').children.length, 0);
+    ui.$('activeTab').click();
+    now = 109999;
+    await ui.tick();
+    assert.equal(ui.$('activeTabCount').textContent, '1');
+    now = 110000;
+    await ui.tick();
+    assert.equal(ui.$('activeTabCount').textContent, '0');
+    assert.equal(ui.$('recentTabCount').textContent, '1');
+    ui.$('recentTab').click();
+    assert.match(ui.$('alertsList').textContent, /Possible weapon/);
+    assert.deepEqual(ui.errors, []);
+  } finally { ui.close(); }
+});
+
+test('clearing Recent preserves active alerts and history and survives reopening', async () => {
+  const a = await app();
+  const now = Date.now(), old = {id: 'c'.repeat(32), start: 1, end: 2,
+    scene: 'THREAT', alerts: ['Weapon Threat'], confidence: .65, observed_at: now / 1000 - 60};
+  const active = {...old, id: 'd'.repeat(32), start: 3, end: 4, observed_at: now / 1000};
+  const status = {running: true, source: '0', source_generation: 1, frame: 4, ts: 4,
+    fight_status: 'ASSESSED', timeline: [old, active], active_event_ids: [active.id],
+    scene: {verdict: 'NO_FIGHT'}, alert_details: {'Weapon Threat': {confidence: .65}}};
+  let reopened;
+  try {
+    await a.poll(status);
+    assert(a.$('clearRecentButton').hidden);
+    a.$('recentTab').click();
+    assert(!a.$('clearRecentButton').hidden);
+    assert.equal(a.$('recentTabCount').textContent, '1');
+    a.$('clearRecentButton').click();
+    assert(a.$('clearRecentDialog').open);
+    a.w.document.querySelector('[data-close="clearRecentDialog"]').click();
+    assert.equal(a.$('recentTabCount').textContent, '1');
+    a.$('clearRecentButton').click();
+    a.$('confirmClearRecent').click();
+    assert.equal(a.$('recentTabCount').textContent, '0');
+    assert.equal(a.$('activeTabCount').textContent, '1');
+    assert.equal(a.$('navIncidentCount').textContent, '2');
+    assert(a.$('clearRecentButton').disabled);
+    await a.poll(status);
+    assert.equal(a.$('alertsList').children.length, 0, 'Polling must not restore cleared alerts');
+    a.w.location.hash = 'incidents';
+    a.w.dispatchEvent(new a.w.HashChangeEvent('hashchange'));
+    await flush();
+    assert.equal(a.$('incidentRows').children.length, 2);
+    const storage = Object.fromEntries(Object.keys(a.w.localStorage).map(key => [key, a.w.localStorage.getItem(key)]));
+    reopened = await app(undefined, storage);
+    await reopened.poll(status);
+    reopened.$('recentTab').click();
+    assert.equal(reopened.$('recentTabCount').textContent, '0');
+    assert.equal(reopened.$('activeTabCount').textContent, '1');
+    const newer = {...old, id: 'e'.repeat(32), start: 5, end: 6};
+    await reopened.poll({...status, frame: 6, ts: 6, timeline: [old, active, newer]});
+    assert.equal(reopened.$('recentTabCount').textContent, '1', 'New incidents must still enter Recent');
+    assert.deepEqual(a.errors, []);
+    assert.deepEqual(reopened.errors, []);
+  } finally { a.close(); reopened?.close(); }
+});
+
 test('recipient QR is replaced by the device that consumed the invite', async () => {
   const phone = {code: 'c'.repeat(43), progress: {status: 'waiting'}, devices: []};
   const a = await app(phone);
@@ -151,7 +229,7 @@ test('public PWA invites are selected automatically when the public app is avail
 test('recipient prompt waits for a choice and resumes the selected source once', async () => {
   const a = await app();
   try {
-    a.$('demoUploadButton').click(); await flush();
+    a.$('connectButton').click(); await flush();
     assert(a.$('recipientCautionDialog').open);
     assert.equal(a.$('sourceModal').open, false);
     assert(!a.calls.some(c => ['/api/source', '/api/webcam/start', '/api/upload'].includes(c.url)));
@@ -166,7 +244,7 @@ test('recipient prompt waits for a choice and resumes the selected source once',
 test('closing the recipient prompt cancels the pending source action', async () => {
   const a = await app();
   try {
-    a.$('demoUploadButton').click(); await flush();
+    a.$('connectButton').click(); await flush();
     a.$('recipientCautionDialog').close();
     a.$('cautionSkipRecipient').click(); await flush();
     assert.equal(a.$('sourceModal').open, false);
@@ -196,15 +274,16 @@ test('four cards open their actual source flows; focus and navigation work', asy
   } finally { a.close(); }
 });
 
-test('demo bar runs a bundled video and confirms even a same-source restart', async () => {
+test('video library is removed and the upload source action remains available', async () => {
   const a = await app();
   try {
-    const download = a.$('demoVideos').querySelector('a'); assert.equal(download.getAttribute('href'), '/api/demos/download/test1.mp4');
-    a.$('demoVideos').querySelector('button').click(); await flush();
-    assert(a.calls.some(c => c.url === '/api/demo' && JSON.parse(c.options.body).sample === 'test1.mp4'));
-    await a.poll({source: 'test1.mp4', source_generation: 1, running: true, frame: 0, ts: 0, fight_status: 'WARMING_UP'});
-    assert.equal(a.$('sourceModal').open, false);
-    assert.equal(a.$('sourceName').textContent, 'test1.mp4');
+    assert.equal(a.$('demoVideos'), null);
+    assert.equal(a.$('demoUploadButton'), null);
+    assert.equal(a.w.document.querySelector('.demo-bar'), null);
+    assert(!a.w.document.body.textContent.includes('Video library'));
+    await a.openSource(a.$('connectButton'));
+    assert(!a.$('uploadVideoForm').hidden);
+    assert(!a.calls.some(c => c.url === '/api/demo' || c.url.startsWith('/api/demos/download/')));
     assert.deepEqual(a.errors, []);
   } finally { a.close(); }
 });
@@ -253,7 +332,7 @@ test('browser alerts request permission on click and notify once per real incide
 test('upload sends the selected video, confirms capture, and exposes its filename', async () => {
   const a = await app();
   try {
-    await a.openSource(a.$('demoUploadButton'));
+    await a.openSource(a.$('connectButton'));
     const file = new a.w.File(['sample'], 'judge-clip.mp4', {type: 'video/mp4'});
     Object.defineProperty(a.$('videoFileInput'), 'files', {value: [file]});
     a.submit('uploadVideoForm'); await flush();
@@ -293,8 +372,11 @@ test('closing while webcam permission is pending releases the camera when it res
 test('source errors stay visible without reporting a successful connection', async () => {
   const a = await app();
   try {
-    a.$('demoVideos').querySelector('button').click(); await flush();
-    await a.poll({running: false, source: 'test1.mp4', source_generation: 1, error: 'Cannot decode this video'});
+    await a.openSource(a.$('connectButton'));
+    const file = new a.w.File(['invalid video'], 'unreadable.mp4', {type: 'video/mp4'});
+    Object.defineProperty(a.$('videoFileInput'), 'files', {value: [file]});
+    a.submit('uploadVideoForm'); await flush();
+    await a.poll({running: false, source: 'uploaded.mp4', source_generation: 1, error: 'Cannot decode this video'});
     assert(a.$('sourceModal').open);
     assert.match(a.$('modalMessage').textContent, /Cannot decode/);
     assert.equal(a.$('serviceNotice').hidden, false);

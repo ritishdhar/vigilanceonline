@@ -10,10 +10,10 @@ short-gun, long-gun, knife, fire, smoke, phone, person, car, bag,
 backpack, handbag, ...). That single model covers every category VIGLANCE
 reasons about, so the former second detector
 (``Subh775/Threat-Detection-YOLOv8n``) is disabled: it is never resolved,
-never downloaded, and its cross-model "agreement" rule is gone. Weapon
-    High-confidence bar (``high_conf``) applies to streak counting for every
-    category, so weapon AND fire/smoke alerts all need sustained high-confidence
-    detections. Bag alerts stay dark unless explicitly enabled.
+never downloaded, and its cross-model "agreement" rule is gone. Weapon alerts
+use the same confidence threshold as the visible weapon detections and require
+consecutive frames. Fire/smoke retain the stricter ``high_conf`` threshold.
+Bag alerts stay dark unless explicitly enabled.
 
 ``MultiModelThreatDetector`` is a backwards-compatible alias for
 ``SurveillanceThreatDetector`` (the two-model era). ``threat_weights`` is
@@ -273,7 +273,8 @@ class SurveillanceThreatDetector:
             for category in ("weapon", "fire", "smoke", "bag")
         }
         for category, detection in best.items():
-            if detection is not None and detection.confidence >= self.high_conf:
+            threshold = self.conf if category == "weapon" else self.high_conf
+            if detection is not None and detection.confidence >= threshold:
                 self.streaks[category] = self.streaks.get(category, 0) + 1
             else:
                 self.streaks[category] = 0
@@ -283,7 +284,7 @@ class SurveillanceThreatDetector:
         if (
             self.enable_weapon_alerts
             and weapon is not None
-            and weapon.confidence >= self.high_conf
+            and weapon.confidence >= self.conf
             and self.streaks["weapon"] >= self.confirm_frames
         ):
             alerts["Weapon Threat"] = {

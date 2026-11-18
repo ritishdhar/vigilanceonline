@@ -348,6 +348,60 @@ def test_public_detection_notice_omits_camera_evidence_and_deduplicates(tmp_path
     assert device is not None
 
 
+@pytest.mark.parametrize("label", ["knife", "short-gun"])
+def test_confirmed_weapon_reaches_phone_outbox_without_a_fight(tmp_path, monkeypatch, label):
+    from base64 import urlsafe_b64encode
+    from threading import Event
+    from types import SimpleNamespace
+
+    from config import VigilanceConfig
+    from core.pipeline import Pipeline
+    from core.threat_detection import SurveillanceThreatDetector, ThreatDetection
+    from tests.conftest import FakeDetector
+    import ui
+
+    live = LiveState(incident_store=IncidentStore(tmp_path / "live"))
+    public = LiveState(incident_store=IncidentStore(tmp_path / "public"))
+    live.demo_recipient_state = public
+    public.phone_push = SimpleNamespace(wake=Event())
+    invite, _ = public.phone_recipients.invite("recipient")
+    phone = public.phone_recipients.session(public.phone_recipients.enroll(invite, "Phone"))
+    public.phone_recipients.subscribe(phone["id"], {
+        "endpoint": "https://fcm.googleapis.com/fcm/send/weapon-test",
+        "keys": {
+            "p256dh": urlsafe_b64encode(b"\x04" + b"X" * 64).decode(),
+            "auth": urlsafe_b64encode(b"X" * 16).decode(),
+        },
+    })
+    cfg = VigilanceConfig(enable_fight=False, enable_fall=False, enable_fire=False)
+    detector = SurveillanceThreatDetector(conf=cfg.conf, enable_weapon_alerts=cfg.enable_threats)
+    detector._load_attempted = True
+    detector.models = {"surveillance": object()}
+    monkeypatch.setattr(detector, "_predict", lambda _: [
+        ThreatDetection("surveillance", label, "weapon", 0.65, [10, 10, 40, 40])
+    ])
+    pipeline = Pipeline(config=cfg, detector=FakeDetector([[]]), threat_detector=detector)
+
+    def finish(_):
+        if pipeline.frame_index >= 4:
+            live.stop = True
+
+    monkeypatch.setattr(ui.time, "sleep", finish)
+    try:
+        ui.pump_frames(live, pipeline, "synthetic", 10, [np.zeros((80, 80, 3), dtype=np.uint8)])
+        records = public.incident_store.list()
+        assert len(records) == 1
+        assert records[0]["title"] == "Possible weapon detected"
+        assert live.incident_store.get(records[0]["id"])["confidence"] == 0.65
+        delivery = public.phone_recipients.next_delivery()
+        assert delivery["incident_id"] == records[0]["id"]
+        assert delivery["device_id"] == phone["id"]
+        assert public.phone_push.wake.is_set()
+    finally:
+        live.uploads.close()
+        public.uploads.close()
+
+
 def test_public_notice_opens_evidence_only_at_the_protected_origin(workspace, tmp_path):
     from urllib.parse import parse_qs, urlsplit
 

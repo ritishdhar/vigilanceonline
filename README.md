@@ -47,7 +47,7 @@ Uploads are limited to 256 MiB each and 512 MiB per session. Only application-ow
 
 Model deserialization never retries unrestricted pickle. YOLO requires the locked runtime's restricted loader, and runtime package auto-installation is disabled. The auxiliary artifact uses a fixed revision and SHA-256 with atomic verified downloads. `models/manifest.json` identifies the four release artifacts; `models/regression.json` records a deterministic numerical fixture. Artifact integrity and numerical regression are not accuracy certification.
 
-Inference runs locally. Fire detection is enabled by default and downloads the pinned auxiliary model from Hugging Face when needed. Use `--no-threat-download` for cached weights only, or `--no-threats` to disable all auxiliary detection.
+Inference runs locally. Weapon alerts (including knives) and fire detection are enabled by default and use the pinned auxiliary model, downloaded from Hugging Face when needed. Weapons must meet the displayed detection threshold for three consecutive frames before an alert is raised. Fire/smoke retain their stricter confidence threshold. New alerts stay in Active for at least 10 seconds and then move to Recent once detection has stopped. Use `--no-threat-download` for cached weights only, or `--no-threats` to disable all auxiliary detection.
 
 ## Validation and evaluation
 

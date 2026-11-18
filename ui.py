@@ -192,6 +192,7 @@ class LiveState:
                         "end": round(float(timestamp), 3),
                         "scene": event_scene,
                         "alerts": sorted(event_alerts),
+                        "observed_at": time.time(),
                     }
                     entry = (event_id, event)
                     self.timeline.append(event)
@@ -799,12 +800,12 @@ def parse_args(argv=None):
     p.add_argument(
         "--threats",
         action="store_true",
-        help="opt in to the auxiliary YOLO threat model (OFF by default; violence-only focus)",
+        help="enable auxiliary weapon alerts, including knives",
     )
     p.add_argument(
         "--enable-weapon-alerts",
         action="store_true",
-        help="enable weapon alerts (disabled by default for demo stability)",
+        help="enable weapon alerts, including knives (enabled in the default config)",
     )
     p.add_argument(
         "--no-threat-download",
@@ -855,6 +856,24 @@ def build_config(args) -> VigilanceConfig:
             else cfg.fight_cfg.model.device
         )
     return cfg
+
+
+def build_threat_detector(cfg, args):
+    if not (cfg.enable_threats or cfg.enable_fire):
+        return None
+    from core.threat_detection import SurveillanceThreatDetector
+
+    return SurveillanceThreatDetector(
+        surveillance_weights=args.surveillance_weights,
+        download_missing=not args.no_threat_download,
+        conf=cfg.conf,
+        imgsz=cfg.imgsz,
+        device=cfg.device,
+        bag_proximity_px=cfg.bag_proximity_px,
+        enable_weapon_alerts=cfg.enable_threats,
+        enable_fire_alerts=cfg.enable_fire,
+        enable_bag_alerts=False,
+    )
 
 
 def main(argv=None) -> int:
@@ -970,7 +989,6 @@ def main(argv=None) -> int:
 
     from core.demo import ScriptedDetector, black_frames
 
-    use_threat_detector = cfg.enable_threats or cfg.enable_fire
     if args.synthetic:
         script = [
             [(1, 60.0), (2, 220.0)],
@@ -1019,21 +1037,7 @@ def main(argv=None) -> int:
     if args.require_gpu and cfg.enable_fight and not pipeline.pair_adapter.head_trained:
         raise RuntimeError("GPU deployment requires the trained fight checkpoint")
 
-    threat_detector = None
-    if use_threat_detector:
-        from core.threat_detection import SurveillanceThreatDetector
-
-        threat_detector = SurveillanceThreatDetector(
-            surveillance_weights=args.surveillance_weights,
-            download_missing=not args.no_threat_download,
-            conf=cfg.conf,
-            imgsz=cfg.imgsz,
-            device=cfg.device,
-            bag_proximity_px=cfg.bag_proximity_px,
-            enable_weapon_alerts=args.enable_weapon_alerts,
-            enable_fire_alerts=cfg.enable_fire,
-            enable_bag_alerts=False,
-        )
+    threat_detector = build_threat_detector(cfg, args)
     # All entrypoints now use core-owned auxiliary detections and health.
     pipeline.threat_detector = threat_detector
     for origin in args.frontend_origin:

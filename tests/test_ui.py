@@ -352,7 +352,8 @@ def test_pair_payload_carries_readiness(live_state):
         assert pair["span"] >= 0.0
 
 
-def test_timeline_groups_contiguous_fight_frames():
+def test_timeline_groups_contiguous_fight_frames(monkeypatch):
+    monkeypatch.setattr(time, "time", lambda: 1234.5)
     state = LiveState()
     state.record_event(2.0, "FIGHT", {})
     state.record_event(2.1, "FIGHT", {})
@@ -364,6 +365,7 @@ def test_timeline_groups_contiguous_fight_frames():
             "end": 2.1,
             "scene": "FIGHT",
             "alerts": [],
+            "observed_at": 1234.5,
         }
     ]
 

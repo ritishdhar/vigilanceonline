@@ -71,13 +71,11 @@ class VigilanceConfig:
     # --- track lifecycle (registry) ---
     lost_timeout_sec: float = 1.0  # gap without sighting before LOST
     lost_grace_sec: float = 5.0  # LOST retention before REMOVED
-    # --- scenario enable/disable (violence + fire + fall focus; re-enable others explicitly) ---
+    # --- scenario enable/disable ---
     enable_fall: bool = True  # pose-rule fall module (no extra weights)
     enable_bag: bool = False
     enable_fight: bool = True  # ST-GCN++ pair/graph fight path (the active fight path)
-    enable_threats: bool = (
-        False  # auxiliary YOLO threat model (weapon/fire/bag); opt-in only
-    )
+    enable_threats: bool = True  # weapon alerts, including knives, from auxiliary YOLO
     enable_fire: bool = (
         True  # fire/smoke alerts from the threat model; violence + fire focus
     )

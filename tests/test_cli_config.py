@@ -51,14 +51,14 @@ def test_no_config_falls_back_to_defaults():
 
 
 @pytest.mark.parametrize("path", ["config/default.json"])
-def test_default_config_is_violence_fire_fall_only(path):
+def test_default_config_enables_weapons_fights_fire_and_falls(path):
     cfg = VigilanceConfig.from_file(path)
     cfg.validate()
     assert cfg.enable_fight is True
     assert cfg.enable_fire is True
     assert cfg.enable_fall is True
     assert cfg.enable_bag is False
-    assert cfg.enable_threats is False
+    assert cfg.enable_threats is True
 
 
 def test_violence_fire_fall_pipeline_registers_no_other_scenarios():
@@ -101,6 +101,21 @@ def test_no_threats_disables_fire_and_opted_in_auxiliary_model():
     cfg = build_config(parse_args(["--threats", "--no-threats"]))
     assert cfg.enable_fire is False
     assert cfg.enable_threats is False
+
+
+@pytest.mark.parametrize("flags,enabled", [([], True), (["--threats"], True),
+    (["--enable-weapon-alerts"], True), (["--no-threats"], False)])
+def test_ui_auxiliary_model_uses_effective_weapon_settings(flags, enabled):
+    from ui import build_config, build_threat_detector, parse_args
+
+    args = parse_args(flags + ["--no-threat-download"])
+    cfg = build_config(args)
+    detector = build_threat_detector(cfg, args)
+    if not enabled:
+        assert detector is None
+    else:
+        assert detector.enable_weapon_alerts is True
+        assert detector.conf == cfg.conf
 
 
 def test_gpu_requirement_cannot_be_overridden_by_cpu():

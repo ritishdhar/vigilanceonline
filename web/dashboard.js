@@ -9,6 +9,10 @@ const RakshaUI = (() => {
     GROUP_ASSAULT: "Possible group assault"
   };
   const MAX_STORED_ALERTS = 100;
+  const MIN_ACTIVE_ALERT_MS = 10000;
+  function isActiveAlert(entry, now = Date.now()) {
+    return entry.active || now < (entry.activeUntil || 0);
+  }
   const words = {
     "Fall Detection": "Possible fall",
     "Abandoned Bag": "Unattended bag",
@@ -144,7 +148,7 @@ const RakshaUI = (() => {
       }
       const timeline = Array.isArray(s.timeline) ? s.timeline : [];
       const created = [], evicted = [], capturing = isCapturing(s) && fresh;
-      function upsert(kind, start, end, scene, backendId) {
+      function upsert(kind, start, end, scene, backendId, observedAt) {
         const persistent = /^[0-9a-f]{32}$/.test(backendId || "");
         const id = persistent ? savedKey(backendId, kind) : epoch + ":" + (backendId ?? start) + ":" + kind;
         let entry = alertStore.get(id);
@@ -155,8 +159,10 @@ const RakshaUI = (() => {
             score: null, reason: "Recorded activity. Review the available context.",
             review: "unreviewed", active: false, uncertain: false,
             savedId: persistent ? backendId : null,
-            firstSeen: now, lastSeen: null, snapshot: null, synthetic: s.inference_mode === "synthetic"
+            firstSeen: Number.isFinite(observedAt) ? Math.min(now, observedAt * 1000) : now,
+            lastSeen: null, snapshot: null, synthetic: s.inference_mode === "synthetic"
           };
+          entry.activeUntil = entry.firstSeen + MIN_ACTIVE_ALERT_MS;
           alertStore.set(id, entry); created.push(entry);
         }
         entry.end = Math.max(entry.end, end);
@@ -167,7 +173,7 @@ const RakshaUI = (() => {
         const kinds = new Set((event.alerts || []).map(category));
         if (FIGHT_SCENES.includes(event.scene)) kinds.add("fight");
         for (const kind of kinds) {
-          const entry = upsert(kind, event.start, event.end, event.scene, event.id);
+          const entry = upsert(kind, event.start, event.end, event.scene, event.id, event.observed_at);
           if (score(event.confidence) !== null) entry.score = score(event.confidence);
           if (event.id && Array.isArray(s.active_event_ids)) {
             entry.active = capturing && s.active_event_ids.includes(event.id);
@@ -190,12 +196,12 @@ const RakshaUI = (() => {
         const event = candidates[candidates.length - 1];
         if (!episodes.has(detection.kind)) episodes.set(detection.kind, Number(s.ts) || 0);
         const start = event ? event.start : episodes.get(detection.kind);
-        const entry = upsert(detection.kind, start, Number(s.ts) || 0, s.scene?.verdict, event?.id);
+        const entry = upsert(detection.kind, start, Number(s.ts) || 0, s.scene?.verdict, event?.id, event?.observed_at);
         Object.assign(entry, detection, {active: true, lastSeen: now});
       }
       for (const kind of episodes.keys()) if (!firing.has(kind)) episodes.delete(kind);
       while (alertStore.size > MAX_STORED_ALERTS) {
-        const oldest = [...alertStore.values()].find(entry => !entry.active);
+        const oldest = [...alertStore.values()].find(entry => !isActiveAlert(entry, now));
         if (!oldest) break;
         alertStore.delete(oldest.id); evicted.push(oldest);
       }
@@ -222,7 +228,8 @@ const RakshaUI = (() => {
     return '"' + (/^[=+\-@\t\r]/.test(text) ? "'" : "") + text.replace(/"/g, '""') + '"';
   }
   return {escapeHTML, score, topPairScore, sourceLabel, sourceMode, sourceTime,
-    isCapturing, currentDetections, health, createSession, csvCell, category, savedKey, MAX_STORED_ALERTS};
+    isCapturing, currentDetections, health, createSession, csvCell, category, savedKey, MAX_STORED_ALERTS,
+    isActiveAlert, MIN_ACTIVE_ALERT_MS};
 })();
 if (typeof module !== "undefined" && module.exports) module.exports = RakshaUI;
 
@@ -248,6 +255,15 @@ if (typeof document !== "undefined") (() => {
   }
   if (apiBase) $("liveStream").src = endpoint("/stream.mjpg");
   const session = RakshaUI.createSession(), alertStore = session.alertStore;
+  const clearedRecentKey = "rakshanetra.cleared-recent." + (apiBase || location.origin);
+  const clearedRecent = new Set();
+  try {
+    const stored = JSON.parse(localStorage.getItem(clearedRecentKey) || "[]");
+    if (Array.isArray(stored)) for (const id of stored.slice(-1000)) {
+      if (typeof id === "string" && id.length <= 160) clearedRecent.add(id);
+    }
+  } catch (_) {}
+  let pendingRecentClear = [];
   const defaults = {workspace: "Judge workspace", camera: "Active feed", clock: "12", layout: "grid"};
   const reviewLabels = {unreviewed: "Needs review", acknowledged: "Acknowledged", resolved: "Resolved", "false-positive": "False positive"};
   const views = {
@@ -778,51 +794,10 @@ if (typeof document !== "undefined") (() => {
   async function loadCapabilities() {
     try {
       capabilities = await readResponse(await apiFetch("/api/capabilities"));
-      $("demoVideos").replaceChildren();
-      for (const sample of capabilities.samples || []) {
-        const item = document.createElement("div"); item.className = "demo-item";
-        const label = document.createElement("strong"); label.className = "demo-title";
-        label.textContent = sample.name || sample.filename.replace(/\.[^.]+$/, "").replace(/[_-]/g, " "); label.title = sample.filename;
-        const run = document.createElement("button"); run.type = "button"; run.className = "demo-preview";
-        const preview = document.createElement("video"); preview.muted = true; preview.playsInline = true; preview.preload = "metadata";
-        preview.setAttribute("aria-hidden", "true"); preview.tabIndex = -1;
-        preview.src = endpoint("/api/demos/download/" + encodeURIComponent(sample.id)) + "#t=0.1";
-        const fallback = document.createElement("span"); fallback.className = "demo-preview-fallback"; fallback.textContent = "VIDEO PREVIEW";
-        preview.addEventListener("loadeddata", () => { fallback.hidden = true; });
-        preview.addEventListener("error", () => { preview.hidden = true; fallback.hidden = false; });
-        const play = document.createElement("span"); play.className = "demo-play"; play.textContent = "▶"; play.setAttribute("aria-hidden", "true");
-        const action = document.createElement("span"); action.className = "demo-preview-action"; action.textContent = "Run demo";
-        run.append(fallback, preview, play, action);
-        run.setAttribute("aria-label", "Run demo " + sample.filename);
-        run.addEventListener("click", async () => {
-          if (sourceBusy) { toast("A source is already starting."); return; }
-          openSource("video"); if (!canAnalyze()) return;
-          setSourceBusy(true); setMessage("Starting " + sample.filename + "…");
-          try {
-            const data = await readResponse(await apiFetch("/api/demo", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({sample: sample.id})}));
-            sourceRequested(data, sample.filename);
-          } catch (error) { setSourceBusy(false); setMessage(error.message, "error"); toast(error.message, "error"); }
-        });
-        const download = document.createElement("a"); download.textContent = "Download";
-        download.href = endpoint("/api/demos/download/" + encodeURIComponent(sample.id)); download.download = sample.filename;
-        download.setAttribute("aria-label", "Download " + sample.filename);
-        const details = document.createElement("div"); details.className = "demo-details";
-        const description = document.createElement("span"); description.className = "demo-description"; description.textContent = "Ready to analyze";
-        const caption = document.createElement("div"); caption.className = "demo-caption"; caption.append(label, description);
-        details.append(caption, download); item.append(run, details); $("demoVideos").append(item);
-      }
-      if (!capabilities.samples?.length) $("demoVideos").textContent = "No bundled clips. Upload your own video.";
       $("configuredCamera").replaceChildren(new Option("Enter a stream URL", ""));
       for (const stream of capabilities.streams || []) $("configuredCamera").add(new Option(stream.label, stream.id));
-    } catch (_) {
-      $("demoVideos").replaceChildren();
-      const retry = document.createElement("button"); retry.type = "button"; retry.className = "text-button";
-      retry.textContent = "Could not load videos · Retry"; retry.addEventListener("click", loadCapabilities); $("demoVideos").append(retry);
-    }
+    } catch (_) { /* Source selection also works without a capability response. */ }
   }
-  $("demoUploadButton").addEventListener("click", () => {
-    verifyRecipientBeforeAction(() => openSource("video"));
-  });
 
   function renderNotificationPreference() {
     const supported = "Notification" in window && window.isSecureContext;
@@ -843,7 +818,7 @@ if (typeof document !== "undefined") (() => {
     toast(notificationsEnabled ? "Browser incident alerts enabled." : Notification.permission === "denied" ? "Notifications blocked by browser settings. In-app alerts are still active." : "Browser alerts off. In-app alerts remain active.");
   });
   function notifyIncidents(created) {
-    const active = created.filter(entry => entry.active && !entry.synthetic);
+    const active = created.filter(entry => RakshaUI.isActiveAlert(entry) && !entry.synthetic);
     if (!active.length) return;
     toast(active.length === 1 ? active[0].title + " · Open the incident inbox to review." : active.length + " new incidents · Open the inbox to review.", "incident");
     if (!notificationsEnabled || !("Notification" in window) || Notification.permission !== "granted") return;
@@ -1095,6 +1070,9 @@ if (typeof document !== "undefined") (() => {
   }
 
   function entries() { return [...alertStore.values()].sort((a, b) => b.firstSeen - a.firstSeen || b.serial - a.serial); }
+  function recentEntries() {
+    return entries().filter(entry => !RakshaUI.isActiveAlert(entry) && !clearedRecent.has(entry.id));
+  }
   let historyRequestedAt = -Infinity, historyLoading = false;
   async function refreshSavedIncidents() {
     if (!status.incident_history || historyLoading || Date.now() - historyRequestedAt < 2500) return;
@@ -1107,6 +1085,7 @@ if (typeof document !== "undefined") (() => {
         let entry = alertStore.get(id);
         if (!entry) {
           entry = {id, savedId: record.id, kind, start: record.source_time, end: record.source_time,
+            activeUntil: Math.min(Date.now(), record.observed_at * 1000) + RakshaUI.MIN_ACTIVE_ALERT_MS,
             active: false, uncertain: false, snapshot: null, reason: "Review the incident evidence before acting."};
           alertStore.set(id, entry);
         }
@@ -1134,18 +1113,21 @@ if (typeof document !== "undefined") (() => {
     if (el && el.textContent !== next) el.textContent = next;
   }
   function updateCounts() {
-    const all = entries(), active = all.filter(e => e.active);
+    const all = entries(), active = all.filter(e => RakshaUI.isActiveAlert(e));
     text("topAlertCount", connected && !stale ? String(active.length).padStart(2, "0") : "—");
     text("sessionIncidentCount", String(all.length).padStart(2, "0"));
     text("inboxCount", active.length); text("activeTabCount", active.length);
-    text("recentTabCount", all.length); text("navIncidentCount", all.length);
+    text("recentTabCount", recentEntries().length); text("navIncidentCount", all.length);
     text("reviewCount", all.filter(e => e.review !== "unreviewed").length + " reviewed");
     text("pendingReviewCount", all.filter(e => e.review === "unreviewed").length);
     text("activeStatNote", !connected || stale ? "Current detection status unknown" : active.length ? "Review the observed activity" : status.fight_status === "ASSESSED" && isCapturing(status) ? "No current incidents detected" : status.ended ? "Video processing complete" : "Assessment status shown below");
     $("exportButton").disabled = all.length === 0;
   }
   function renderAlerts() {
-    const all = entries(), visible = inboxTab === "active" ? all.filter(e => e.active) : all.slice(0, 12);
+    const all = entries(), matching = inboxTab === "active" ? all.filter(e => RakshaUI.isActiveAlert(e)) : recentEntries();
+    const visible = inboxTab === "active" ? matching : matching.slice(0, 12);
+    $("clearRecentButton").hidden = inboxTab !== "recent";
+    $("clearRecentButton").disabled = matching.length === 0;
     const desired = visible.map(entry => {
       let node = cardNodes.get(entry.id);
       if (!node) {
@@ -1156,8 +1138,8 @@ if (typeof document !== "undefined") (() => {
           '<span class="review-tag" data-field="review"></span><div class="alert-actions"><button class="button primary" data-action="review">Review incident</button><button class="button secondary" data-action="acknowledge">Acknowledge</button></div>';
         cardNodes.set(entry.id, node);
       }
-      node.classList.toggle("stale", !entry.active);
-      field(node, "title", entry.title); field(node, "state", entry.synthetic ? "DEMO" : entry.active ? "ACTIVE" : entry.uncertain ? "LAST RECEIVED" : "RECORDED");
+      node.classList.toggle("stale", !RakshaUI.isActiveAlert(entry));
+      field(node, "title", entry.title); field(node, "state", entry.synthetic ? "DEMO" : entry.active ? "ACTIVE" : RakshaUI.isActiveAlert(entry) ? "NEW ALERT" : entry.uncertain ? "LAST RECEIVED" : "RECORDED");
       field(node, "camera", "CAM-01 · " + entry.camera);
       field(node, "scoreLabel", entry.kind === "fight" ? "Fight model score" : "Detection score");
       field(node, "score", entry.score === null ? "Not retained" : Math.round(entry.score * 100) + "%");
@@ -1173,7 +1155,7 @@ if (typeof document !== "undefined") (() => {
     orderedNodes($("alertsList"), desired); $("inboxEmpty").hidden = visible.length > 0;
     if (!visible.length) {
       let title, detail;
-      if (inboxTab === "recent") { title = "No recorded incidents"; detail = "Detections from this session appear here."; }
+      if (inboxTab === "recent") { title = "No recent alerts"; detail = "New alerts move here after they leave Active. Saved recordings are in Incident history."; }
       else if (!connected || stale) { title = "Connection interrupted"; detail = "Current activity is unknown. Previous incidents are retained."; }
       else if (status.inference_mode === "synthetic") { title = "Scripted demonstration"; detail = "Connect in model mode to test real camera or video detection."; }
       else if (status.error) { title = "Source needs attention"; detail = "Check the source error above and reconnect."; }
@@ -1192,6 +1174,23 @@ if (typeof document !== "undefined") (() => {
     }
     renderAlerts();
   });
+  $("clearRecentButton").addEventListener("click", () => {
+    pendingRecentClear = recentEntries().map(entry => entry.id);
+    if (pendingRecentClear.length) showDialog("clearRecentDialog");
+  });
+  $("confirmClearRecent").addEventListener("click", () => {
+    for (const id of pendingRecentClear) {
+      const entry = alertStore.get(id);
+      if (entry && !RakshaUI.isActiveAlert(entry)) clearedRecent.add(id);
+    }
+    pendingRecentClear = [];
+    let saved = true;
+    try { localStorage.setItem(clearedRecentKey, JSON.stringify([...clearedRecent].slice(-1000))); }
+    catch (_) { saved = false; }
+    closeDialog("clearRecentDialog");
+    renderAlerts();
+    toast(saved ? "Recent alerts cleared. Recordings remain in Incident history." : "Recent alerts cleared for this visit. Browser storage is unavailable.");
+  });
   $("alertsList").addEventListener("click", event => {
     const button = event.target.closest("[data-action]"); if (!button) return;
     const entry = alertStore.get(button.closest("[data-id]").dataset.id); if (!entry) return;
@@ -1208,7 +1207,7 @@ if (typeof document !== "undefined") (() => {
     const query = $("incidentSearch").value.toLowerCase().trim(), filter = $("incidentFilter").value;
     const filtered = entries().filter(e =>
       (!query || [e.title, e.camera, e.source, "RX-" + e.serial].join(" ").toLowerCase().includes(query)) &&
-      (filter === "all" || (filter === "active" ? e.active : filter === "reviewed" ? e.review !== "unreviewed" : e.review === "unreviewed"))
+      (filter === "all" || (filter === "active" ? RakshaUI.isActiveAlert(e) : filter === "reviewed" ? e.review !== "unreviewed" : e.review === "unreviewed"))
     );
     const desired = filtered.map(entry => {
       let row = rowNodes.get(entry.id);
@@ -1488,5 +1487,6 @@ if (typeof document !== "undefined") (() => {
   setInterval(() => {
     updateClock(); updateFreshness();
     updatePhoneInvite();
+    renderAlerts();
   }, 1000);
 })();

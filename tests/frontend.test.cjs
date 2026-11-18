@@ -31,6 +31,35 @@ test('network loss marks prior detections uncertain, not current or resolved', (
   assert.equal(entry.active, false); assert.equal(entry.uncertain, true);
   assert.equal(entry.review, 'unreviewed');
 });
+
+test('a short alert stays in Active for ten seconds then becomes Recent', () => {
+  const state = UI.createSession();
+  state.consume(fight(), 1000);
+  const entry = [...state.alertStore.values()][0];
+  state.consume(fight({running: false, ended: true}), 2000);
+  assert.equal(entry.active, false, 'The detector must not claim the object is still visible');
+  assert.equal(UI.isActiveAlert(entry, 10999), true);
+  assert.equal(UI.isActiveAlert(entry, 11000), false);
+  assert.equal(entry.review, 'unreviewed');
+});
+
+test('continuous detection can stay Active beyond ten seconds', () => {
+  const state = UI.createSession();
+  state.consume(fight(), 1000);
+  state.consume(fight({frame: 241, ts: 13}), 12000);
+  const entry = [...state.alertStore.values()][0];
+  assert.equal(UI.isActiveAlert(entry, 12000), true);
+  state.consume(fight({running: false, ended: true}), 13000);
+  assert.equal(UI.isActiveAlert(entry, 13000), false);
+});
+
+test('old timeline incidents do not re-enter Active when the dashboard opens', () => {
+  const state = UI.createSession();
+  state.consume(fight({running: false, ended: true, timeline: [
+    {start: 10, end: 12, scene: 'FIGHT', alerts: ['Violence/Fight'], observed_at: 1}
+  ]}), 30000);
+  assert.equal(UI.isActiveAlert([...state.alertStore.values()][0], 30000), false);
+});
 test('stale frames cannot sustain active alerts', () => {
   const state = UI.createSession(); state.consume(fight(), 1000);
   state.consume(fight(), 9000, false);

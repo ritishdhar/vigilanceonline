@@ -14,7 +14,7 @@
   "enable_fall": true,
   "enable_bag": false,
   "enable_fight": true,
-  "enable_threats": false,
+  "enable_threats": true,
   "enable_fire": true,
   "fall_angle_deg": 45.0,
   "fall_stillness_sec": 1.5,

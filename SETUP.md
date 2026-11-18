@@ -169,7 +169,7 @@ This dashboard is still a single shared inference workspace, not a multi-tenant 
 
 The auxiliary model is downloaded only at its recorded immutable revision and digest, unless `--no-threat-download` is used. A verified cache under `models/surveillance/` remains usable offline. It is loaded with the restricted YOLO loader. Download and model initialization can take time at startup.
 
-Fire detection uses this auxiliary model by default. `--no-threats` disables the entire auxiliary detector, including fire/smoke; `--no-fire` disables only fire/smoke alerts. Synthetic mode skips all real model loading and works with the lightweight dependencies even when checkpoint files are present.
+Weapon alerts (including knives) and fire detection use this auxiliary model by default. A weapon must meet the visible detection confidence threshold (`conf`, 0.25 in the default config) for three consecutive frames to generate an incident and phone alert. Fire/smoke retain their stricter confidence threshold. Alerts stay in Active for at least 10 seconds, then move to Recent once detection stops. `--no-threats` disables the entire auxiliary detector, including fire/smoke; `--no-fire` disables only fire/smoke alerts. Synthetic mode skips all real model loading and works with the lightweight dependencies even when checkpoint files are present.
 
 ## Dependency maintenance
 
